@@ -1,0 +1,26 @@
+
+# Core dependencies for the video translation pipeline
+
+# For handling environment variables
+python-dotenv
+dotenv
+
+# For audio and video processing
+openai-whisper
+ffmpeg-python
+
+# For subtitle generation and manipulation
+tqdm
+
+# For language model integration and translation
+langchain
+langchain-openai
+langchain-core
+
+# For audio pre-processing and enhancement
+pydub
+noisereduce
+scipy # A dependency for noisereduce
+
+# For making API calls to translation services
+# openrouter-python # If using OpenRouter
