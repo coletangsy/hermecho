@@ -21,7 +21,10 @@ This project is a high-performance, command-line tool for translating videos wit
 *   **Subtitle Generation:** Creates a standard `.srt` subtitle file and burns it directly into the final video.
 
 ## Demo
-[![Watch the video](https://raw.githubusercontent.com/coletangsy/hermecho/main/demo/yooyeon_250114.png)](https://raw.githubusercontent.com/coletangsy/hermecho/main/demo/yooyeon_250114_translated.mp4)
+
+
+https://github.com/user-attachments/assets/d33e5ae5-6bfb-499d-8da7-963a3059caf0
+
 
 [[Link to Original Video](https://www.youtube.com/watch?v=cWexFmUagsc)] 
 
