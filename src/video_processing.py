@@ -22,7 +22,9 @@ def extract_audio(video_path: str) -> Optional[str]:
             print(f"Error: Video file not found at {video_path}")
             return None
 
-        audio_path = "temp_audio.mp3"
+        # Generate audio path based on video filename to allow concurrent processing
+        base_name = os.path.splitext(video_path)[0]
+        audio_path = f"{base_name}.mp3"
 
         # Construct the ffmpeg command. -y overwrites the output file if it exists.
         command = [
@@ -54,7 +56,7 @@ def extract_audio(video_path: str) -> Optional[str]:
         return None
 
 
-def burn_subtitles_into_video(video_path: str, srt_path: str, output_video_path: str):
+def burn_subtitles_into_video(video_path: str, srt_path: str, output_video_path: str, font_name: str = "Helvetica", font_size: int = 24, outline_width: int = 0, use_box_background: bool = False):
     """
     Burns subtitles from an SRT file into a video.
 
@@ -62,6 +64,10 @@ def burn_subtitles_into_video(video_path: str, srt_path: str, output_video_path:
         video_path: Path to the original video.
         srt_path: Path to the SRT subtitle file.
         output_video_path: Path for the new video with subtitles.
+        font_name: The font to use for subtitles.
+        font_size: The font size for subtitles.
+        outline_width: The width of the text outline (0 for no outline).
+        use_box_background: Whether to use a black box background for subtitles.
     """
     print(f"Burning subtitles into video: {output_video_path}")
 
@@ -69,11 +75,25 @@ def burn_subtitles_into_video(video_path: str, srt_path: str, output_video_path:
     # The srt_path needs to be escaped for ffmpeg's filtergraph syntax,
     # especially for Windows paths.
     escaped_srt_path = srt_path.replace('\\', '/').replace(':', '\\:')
+    
+    # Construct the subtitles filter with style options
+    # BorderStyle=3 is an opaque box. BorderStyle=1 is outline.
+    # BackColour=&H80000000 sets the background to semi-transparent black.
+    # In BorderStyle=3, 'Outline' controls the padding of the box.
+    
+    if use_box_background:
+        # Box style: Opaque box (3), Padding (3), Semi-transparent black background
+        style_options = f"FontName={font_name},FontSize={font_size},Outline=3,Shadow=0,BorderStyle=3,BackColour=&H80000000"
+    else:
+        # Text only style: Outline defined by user, No shadow, Standard border (1)
+        style_options = f"FontName={font_name},FontSize={font_size},Outline={outline_width},Shadow=0,BorderStyle=1"
+
+    subtitles_filter = f"subtitles={escaped_srt_path}:force_style='{style_options}'"
 
     command = [
         "ffmpeg",
         "-i", video_path,
-        "-vf", f"subtitles={escaped_srt_path}",
+        "-vf", subtitles_filter,
         "-c:v", "libx264",  # H.264 codec for wide compatibility
         "-pix_fmt", "yuv420p",  # Pixel format for compatibility
         "-c:a", "aac",      # AAC audio codec for wide compatibility

@@ -2,11 +2,11 @@
 This module contains functions for transcribing audio to text.
 """
 import os
-import whisper
+import whisper # type: ignore
 from typing import Optional, List, Dict
 
 
-def transcribe_audio(audio_path: str, model: str, language: str) -> Optional[List[Dict]]:
+def transcribe_audio(audio_path: str, model: str, language: str, initial_prompt: Optional[str] = None, temperature: float = 0.0) -> Optional[List[Dict]]:
     """
     Transcribes audio to text using the local OpenAI Whisper model, returning segments with timestamps.
 
@@ -14,6 +14,8 @@ def transcribe_audio(audio_path: str, model: str, language: str) -> Optional[Lis
         audio_path: The path to the audio file.
         model: The name of the Whisper model to use.
         language: The language of the audio.
+        initial_prompt: Optional text to provide context to the model (helps with mixed languages).
+        temperature: Sampling temperature. 0.0 is deterministic.
 
     Returns:
         A list of transcription segments with timestamps, or None if an error occurs.
@@ -27,8 +29,21 @@ def transcribe_audio(audio_path: str, model: str, language: str) -> Optional[Lis
         model = whisper.load_model(model)
 
         print(f"Transcribing audio locally (language: {language})...")
-        result = model.transcribe(
-            audio_path, language=language, word_timestamps=True, verbose=True, fp16=False)
+        if initial_prompt:
+            print(f"Using initial prompt: {initial_prompt}")
+
+        result = model.transcribe( # type: ignore
+            audio_path, 
+            language=language, 
+            word_timestamps=True, 
+            verbose=True, 
+            fp16=False,
+            initial_prompt=initial_prompt,
+            temperature=temperature,
+            condition_on_previous_text=False,
+            no_speech_threshold=0.7,
+            compression_ratio_threshold=2.4
+        )
 
         # Save the full transcription to a file for review
         # with open("transcription.txt", "w", encoding="utf-8") as f:
