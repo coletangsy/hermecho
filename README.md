@@ -28,8 +28,8 @@ This project is a high-performance, command-line tool for translating videos wit
 
 ## Demo
 
+https://github.com/user-attachments/assets/ed163e69-4a74-4b88-9f53-636dfb33ee25
 
-https://github.com/user-attachments/assets/d33e5ae5-6bfb-499d-8da7-963a3059caf0
 
 
 [[Link to Original Video](https://www.youtube.com/watch?v=cWexFmUagsc)] 
