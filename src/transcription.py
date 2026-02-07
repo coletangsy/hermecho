@@ -41,7 +41,7 @@ def transcribe_audio(audio_path: str, model: str, language: str, initial_prompt:
             initial_prompt=initial_prompt,
             temperature=temperature,
             condition_on_previous_text=False,
-            no_speech_threshold=0.7,
+            no_speech_threshold=0.85,
             compression_ratio_threshold=2.4
         )
 
