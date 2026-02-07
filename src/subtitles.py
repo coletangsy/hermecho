@@ -4,6 +4,75 @@ This module contains functions for generating, adjusting, and cleaning subtitles
 import logging
 
 
+def split_long_segments(segments: list[dict], max_chars: int = 40, max_duration: float = 7.0) -> list[dict]:
+    """
+    Splits segments that are too long in character count or duration.
+    Requires segments to have 'words' with timestamps (from Whisper word_timestamps=True).
+    
+    Args:
+        segments: List of transcription segments.
+        max_chars: Maximum characters allowed per segment.
+        max_duration: Maximum duration (seconds) allowed per segment.
+        
+    Returns:
+        A new list of segments with long ones split.
+    """
+    split_segments = []
+    
+    for seg in segments:
+        text = seg.get("text", "").strip()
+        start = seg["start"]
+        end = seg["end"]
+        duration = end - start
+        words = seg.get("words", [])
+        
+        # If segment is short enough, keep it as is
+        if len(text) <= max_chars and duration <= max_duration:
+            split_segments.append(seg)
+            continue
+            
+        # If no word timestamps, we can't split accurately, so keep it (or implement naive time split)
+        if not words:
+            split_segments.append(seg)
+            continue
+            
+        # Split logic: Try to split into chunks that fit constraints
+        current_chunk_words = []
+        current_chunk_start = words[0]["start"]
+        
+        for i, word_info in enumerate(words):
+            current_chunk_words.append(word_info)
+            
+            # Check if adding this word exceeds limits relative to chunk start
+            chunk_text = "".join([w["word"] for w in current_chunk_words]).strip()
+            chunk_duration = word_info["end"] - current_chunk_start
+            
+            # Look ahead to see if next word would break the limit
+            next_word_breaks = False
+            if i + 1 < len(words):
+                next_word = words[i+1]
+                next_text_len = len(chunk_text) + len(next_word["word"])
+                next_duration = next_word["end"] - current_chunk_start
+                if next_text_len > max_chars or next_duration > max_duration:
+                    next_word_breaks = True
+            
+            # If we need to split here (either current is long enough, or next breaks it)
+            # But ensure we have at least something in the chunk
+            if next_word_breaks or i == len(words) - 1:
+                split_segments.append({
+                    "text": chunk_text,
+                    "start": current_chunk_start,
+                    "end": word_info["end"],
+                    "words": current_chunk_words
+                })
+                # Reset for next chunk
+                if i + 1 < len(words):
+                    current_chunk_start = words[i+1]["start"]
+                    current_chunk_words = []
+                    
+    return split_segments
+
+
 def fill_transcription_gaps(transcribed_segments: list[dict], gap_threshold: float = 5.0, placeholder: str = "[no speech]") -> list[dict]:
     """
     Identifies and fills significant time gaps in a transcription with placeholder text.

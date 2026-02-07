@@ -61,7 +61,7 @@ def _translate_chunk(
         f"1. **Translate to {target_language}**: Your primary goal is to translate the Korean text accurately.\n"
         "2. **Strict JSON Output**: Your response MUST be a single, valid JSON object with a single key named \"translations\". The value of this key must be a JSON array with the exact same number of items as the input array. Do not include any conversational text, explanations, or markdown.\n"
         "3. **Preserve English Words**: If a segment contains English words, acronyms, or established brand names (e.g., 'OK', 'iPhone', 'fighting'), they MUST be kept in English. Do not translate them.\n"
-        "4. **Preserve Korean Names**: If a word is a proper noun, especially a person's name from the reference material, it MUST be kept in its original Korean form in the final translation. Do not transliterate it.\n"
+        "4. **Translate Names to English**: If a word is a person's name from the reference material, you MUST translate it to their official English Stage Name (e.g., '윤서연' -> 'Yoon SeoYeon'). Do not keep it in Korean.\n"
         "5. **Intelligent Correction**: The transcription from the speech-to-text model may have errors. If you find a word that is likely a misspelled or partial version of a name from the **Reference Material** (e.g., the text says '유연' when the context suggests the member '김유연'), you MUST correct it to the full, proper name from the reference list.\n"
         "6. **Preserve Original Tone**: Maintain the original meaning and natural tone of the dialogue.\n"
     )
@@ -148,25 +148,26 @@ def translate_segments(segments: List[Dict], target_language: str, translation_m
     total_length = len(full_text) + prompt_overhead
 
     try:
-        # Strategy 1: If the total text is within our threshold, translate all at once.
+        # Determine strategy
+        use_sliding_window = False
+        
         if total_length < TOKEN_THRESHOLD:
-            print("Text is short enough. Translating in a single batch.")
+            print("Text is short enough. Attempting to translate in a single batch.")
             translated_segments_text = _translate_chunk(
                 segments, target_language, translation_model, reference_material, context={}
             )
-            # If the single batch fails, fall back to segment-by-segment for the whole thing
+            
             if translated_segments_text is None:
-                print("Single batch translation failed. Falling back to concurrent segment-by-segment.")
-                prompt = ChatPromptTemplate.from_template(f"Translate to {target_language}: {{text}}")
-                model = ChatOpenAI(model=translation_model, openai_api_key=os.getenv("OPENROUTER_API_KEY"), openai_api_base="https://openrouter.ai/api/v1")
-                chain = prompt | model | StrOutputParser()
-                
-                fallback_inputs = [{"text": seg["text"]} for seg in segments]
-                translated_segments_text = chain.batch(fallback_inputs, config={"max_concurrency": 5})
-
-        # Strategy 2: If the text is too long, use the sliding window approach.
+                print("Single batch translation failed (likely segment mismatch). Falling back to sliding window strategy.")
+                use_sliding_window = True
         else:
             print("Text is too long, using sliding window translation.")
+            use_sliding_window = True
+
+        # Strategy 2: Sliding Window (Chunks)
+        # This runs if the text was too long initially, OR if the single batch attempt failed.
+        if use_sliding_window:
+            translated_segments_text = [] # Reset in case partial data exists
             num_chunks = (num_segments + CHUNK_SIZE - 1) // CHUNK_SIZE
 
             for i in tqdm(range(num_chunks), desc="Translating in chunks"):
@@ -186,20 +187,40 @@ def translate_segments(segments: List[Dict], target_language: str, translation_m
                     'next': "\n".join([seg["text"] for seg in next_context_segments])
                 }
 
-                # Primary strategy
+                # Primary strategy for chunk
                 translated_chunk = _translate_chunk(
                     chunk, target_language, translation_model, reference_material, context
                 )
 
-                # Fallback strategy
+                # Fallback strategy for chunk (only if chunk fails)
                 if translated_chunk is None:
-                    print(f"Warning: Chunk {i} failed. Using fallback translation.")
-                    prompt = ChatPromptTemplate.from_template(f"Translate to {target_language}: {{text}}")
-                    model = ChatOpenAI(model=translation_model, openai_api_key=os.getenv("OPENROUTER_API_KEY"), openai_api_base="https://openrouter.ai/api/v1")
-                    chain = prompt | model | StrOutputParser()
+                    print(f"Warning: Chunk {i} failed. Attempting to split into smaller sub-chunks (size 50).")
+                    translated_chunk = []
+                    sub_chunk_size = 50
                     
-                    fallback_inputs = [{"text": seg["text"]} for seg in chunk]
-                    translated_chunk = chain.batch(fallback_inputs, config={"max_concurrency": 5})
+                    # Level 2: Split into chunks of 50
+                    for j in range(0, len(chunk), sub_chunk_size):
+                        sub_chunk = chunk[j : j + sub_chunk_size]
+                        # We reuse the main context for simplicity.
+                        sub_result = _translate_chunk(sub_chunk, target_language, translation_model, reference_material, context)
+                        
+                        if sub_result is None:
+                            print(f"  Warning: Sub-chunk starting at {j} failed. Splitting into mini-chunks (size 10).")
+                            mini_chunk_size = 10
+                            
+                            # Level 3: Split into chunks of 10
+                            for k in range(0, len(sub_chunk), mini_chunk_size):
+                                mini_chunk = sub_chunk[k : k + mini_chunk_size]
+                                mini_result = _translate_chunk(mini_chunk, target_language, translation_model, reference_material, context)
+                                
+                                if mini_result is None:
+                                    print(f"    Error: Mini-chunk starting at {k} failed. Skipping translation for this small section.")
+                                    # Last resort: Return empty strings to avoid crashing or misalignment
+                                    translated_chunk.extend([""] * len(mini_chunk))
+                                else:
+                                    translated_chunk.extend(mini_result)
+                        else:
+                            translated_chunk.extend(sub_result)
 
                 if translated_chunk:
                     translated_segments_text.extend(translated_chunk)
@@ -208,7 +229,12 @@ def translate_segments(segments: List[Dict], target_language: str, translation_m
         final_segments = []
         for i, segment in enumerate(segments):
             translated_segment = segment.copy()
-            if i < len(translated_segments_text):
+            original_text = segment.get("text", "").strip()
+            
+            # If the original text was a placeholder for silence, ensure the translation is empty
+            if original_text == "[no speech]":
+                translated_segment["text"] = ""
+            elif i < len(translated_segments_text):
                 translated_text = translated_segments_text[i]
                 # Clean up punctuation
                 translated_text = translated_text.replace("，", " ").replace("。", " ").strip()

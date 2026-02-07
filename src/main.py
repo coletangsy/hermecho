@@ -3,13 +3,14 @@ This script provides a command-line interface to translate a video from one lang
 """
 import os
 import argparse
+from datetime import datetime
 from dotenv import load_dotenv
 
 from video_processing import extract_audio, burn_subtitles_into_video, is_ffmpeg_installed
 from transcription import transcribe_audio
 from translation import translate_segments
-from subtitles import fill_transcription_gaps, adjust_subtitle_timing, generate_srt
-from utils import load_reference_material, _print_segments
+from subtitles import fill_transcription_gaps, adjust_subtitle_timing, generate_srt, split_long_segments
+from utils import load_reference_material, _print_segments, extract_keywords_for_whisper
 
 load_dotenv()
 
@@ -33,7 +34,7 @@ def _parse_arguments() -> argparse.Namespace:
                         help="The target language for translation.")
     parser.add_argument("--translation_model",
                         default="google/gemini-2.5-pro", help="The model for translation.")
-    parser.add_argument("--time_buffer", type=float, default=0.5,
+    parser.add_argument("--time_buffer", type=float, default=0.1,
                         help="Buffer time between subtitles in seconds.")
     parser.add_argument("--input_dir", default="input",
                         help="The directory where the input video is located.")
@@ -41,6 +42,18 @@ def _parse_arguments() -> argparse.Namespace:
                         help="The directory where the output files will be saved.")
     parser.add_argument("--reference_file",  default="references/tripleS.md",
                         help="Optional path to a reference file for translation context.")
+    parser.add_argument("--initial_prompt", default="This is a conversation in Korean and English.",
+                        help="Initial prompt to guide Whisper (e.g., 'This is a Korean video with some English').")
+    parser.add_argument("--temperature", type=float, default=0.0,
+                        help="Whisper sampling temperature (0.0 is deterministic, higher is more creative).")
+    parser.add_argument("--font_name", default="PingFang TC",
+                        help="Font name for subtitles (default: PingFang TC).")
+    parser.add_argument("--font_size", type=int, default=12,
+                        help="Font size for subtitles (default: 12).")
+    parser.add_argument("--outline_width", type=int, default=0,
+                        help="Subtitle outline width (0 for no outline).")
+    parser.add_argument("--box_background", action="store_true", default=True,
+                        help="Use a black box background for subtitles instead of an outline (default: True).")
     return parser.parse_args()
 
 
@@ -67,12 +80,28 @@ def _process_video(args: argparse.Namespace):
         return
 
     try:
+        # Generate context-aware prompt for Whisper
+        keywords = extract_keywords_for_whisper(args.reference_file)
+        full_prompt = args.initial_prompt
+        if keywords:
+            full_prompt = f"{full_prompt} Context: {keywords}"
+            print(f"Generated Whisper Prompt: {full_prompt}")
+
         transcribed_segments = transcribe_audio(
-            audio_path, model=args.model, language=args.language)
+            audio_path, 
+            model=args.model, 
+            language=args.language,
+            initial_prompt=full_prompt,
+            temperature=args.temperature
+        )
         if not transcribed_segments:
             return
 
         _print_segments(f"Original Transcription ({args.language})", transcribed_segments)
+
+        # Guardrail 0: Split long segments
+        transcribed_segments = split_long_segments(transcribed_segments)
+        _print_segments("Transcription after Splitting", transcribed_segments)
 
         # Guardrail 1: Fill any significant gaps in the transcription
         transcribed_segments = fill_transcription_gaps(transcribed_segments)
@@ -100,16 +129,23 @@ def _process_video(args: argparse.Namespace):
             output_dir = os.path.join(args.output_dir, video_name)
             os.makedirs(output_dir, exist_ok=True)
 
-            srt_path = os.path.join(output_dir, f"{video_name}_subtitles.srt")
+            # Generate timestamp for versioning
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+
+            srt_path = os.path.join(output_dir, f"{video_name}_{timestamp}_subtitles.srt")
             generate_srt(adjusted_segments, srt_path)
 
             # Burn subtitles into a new video file
             output_video_path = os.path.join(
-                output_dir, f"{video_name}_translated.mp4")
+                output_dir, f"{video_name}_{timestamp}_translated.mp4")
             burn_subtitles_into_video(
                 video_path,
                 os.path.abspath(srt_path),
-                os.path.abspath(output_video_path)
+                os.path.abspath(output_video_path),
+                font_name=args.font_name,
+                font_size=args.font_size,
+                outline_width=args.outline_width,
+                use_box_background=args.box_background
             )
 
     finally:

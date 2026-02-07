@@ -11,10 +11,16 @@ This project is a high-performance, command-line tool for translating videos wit
 *   **High-Quality Transcription:** Utilizes a local instance of OpenAI's **Whisper** model for accurate speech-to-text with timestamps.
 *   **Intelligent, Context-Aware Translation:** Employs a Large Language Model (e.g., Gemini 2.5 Pro) with a highly optimized prompt that performs several advanced tasks:
     *   **Contextual Correction:** Uses a reference file to intelligently correct transcription errors in names and key terminology.
-    *   **Preservation of Names & Terms:** Ensures that Korean names and specified English words are preserved in their original form, preventing incorrect transliteration or translation.
-*   **Optimized for Performance:** The translation process is architected for speed and efficiency:
-    *   **Large Batch Processing:** Takes full advantage of the large context windows in modern LLMs to process up to 200 segments at once.
-    *   **Concurrent Fallback:** In case of an error, the system automatically falls back to a concurrent, segment-by-segment translation to ensure robustness without sacrificing speed.
+    *   **Smart Name Handling:** Translates names to official English stage names and preserves specific English terms.
+*   **Optimized for Performance & Robustness:** The translation process is architected for speed and reliability:
+    *   **Adaptive Batch Processing:** Automatically selects the best strategy (single batch vs. sliding window) based on text length.
+    *   **Multi-Level Fallback:** If a translation chunk fails, it recursively splits into smaller batches (50 -> 10 segments) to isolate and resolve issues without failing the whole process.
+*   **Enhanced Transcription:**
+    *   **Context-Aware Prompting:** Extracts keywords from reference materials to guide Whisper, improving accuracy for specific terms and names.
+    *   **Segment Optimization:** Automatically splits overly long segments for better subtitle readability.
+*   **Customizable Subtitles:**
+    *   **Styling Options:** Supports custom fonts, sizes, outlines, and background boxes for professional-looking subtitles.
+    *   **Versioning:** Output files are timestamped to prevent overwriting and allow easy version tracking.
 *   **Robust Error & Gap Handling:** The pipeline includes several guardrails for a more professional result:
     *   **Transcription Gap Filling:** Automatically detects and fills long periods of silence with a `[no speech]` placeholder.
     *   **Strict JSON Communication:** Enforces a strict JSON-based workflow with the LLM to prevent malformed outputs and conversational filler.
@@ -37,13 +43,13 @@ https://github.com/user-attachments/assets/d33e5ae5-6bfb-499d-8da7-963a3059caf0
 The video translation process is a multi-stage pipeline designed for quality and robustness:
 
 1.  **Audio Extraction:** The audio is extracted from the input video using `ffmpeg`.
-2.  **Transcription:** The Korean audio is transcribed into time-coded text segments using a local **Whisper** model.
-3.  **Gap Filling:** The transcription is scanned for significant time gaps, which are filled with a placeholder.
-4.  **Intelligent Translation:** The text segments are sent to an LLM for translation. The system automatically chooses the best strategy:
-    *   For short videos, the entire text is translated in a single, efficient batch.
-    *   For long videos, the text is translated in large, overlapping chunks to maintain context and maximize speed.
+2.  **Transcription:** The Korean audio is transcribed using a local **Whisper** model, primed with context-specific keywords extracted from reference files.
+3.  **Refinement:** Long segments are split for readability, and significant time gaps are filled with placeholders.
+4.  **Intelligent Translation:** The text segments are sent to an LLM. The system employs a robust strategy:
+    *   **Adaptive Batching:** Attempts single-batch translation for shorter texts.
+    *   **Sliding Window with Fallback:** For longer texts or failed batches, it uses a sliding window approach. If a chunk fails, it recursively breaks it down into smaller sub-chunks to ensure completion.
 5.  **Subtitle Generation:** The translated and corrected text segments are used to generate a final `.srt` subtitle file.
-6.  **Video Finalization:** A new video file is created with the generated subtitles burned directly into it.
+6.  **Video Finalization:** A new video file is created with the generated subtitles burned directly into it, applying custom styling (font, size, background).
 
 ## Getting Started
 
@@ -87,6 +93,13 @@ You can customize the process using several optional arguments:
 *   `--language`: The language of the audio. Default is `ko`.
 *   `--target_language`: The target language for translation. Default is `Traditional Chinese (Taiwan)`.
 *   `--reference_file`: Path to a reference file (e.g., a list of names) to improve translation accuracy.
+*   `--initial_prompt`: Initial prompt to guide Whisper (e.g., context or style instructions).
+*   `--temperature`: Whisper sampling temperature (0.0 for deterministic, higher for creativity).
+*   `--font_name`: Font name for subtitles (default: "PingFang TC").
+*   `--font_size`: Font size for subtitles (default: 12).
+*   `--outline_width`: Subtitle outline width (0 for no outline).
+*   `--box_background`: Use a black box background for subtitles (default: True).
+*   `--time_buffer`: Buffer time between subtitles in seconds (default: 0.1).
 
 For more information, run:
 
