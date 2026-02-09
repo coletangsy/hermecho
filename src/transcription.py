@@ -39,10 +39,11 @@ def transcribe_audio(audio_path: str, model: str, language: str, initial_prompt:
             verbose=True, 
             fp16=False,
             initial_prompt=initial_prompt,
+            carry_initial_prompt=True,
             temperature=temperature,
             condition_on_previous_text=False,
             no_speech_threshold=0.85,
-            compression_ratio_threshold=2.4
+            compression_ratio_threshold=1.7,
         )
 
         # Save the full transcription to a file for review

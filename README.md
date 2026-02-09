@@ -27,15 +27,10 @@ This project is a high-performance, command-line tool for translating videos wit
 *   **Subtitle Generation:** Creates a standard `.srt` subtitle file and burns it directly into the final video.
 
 ## Demo
+[![Watch the video](https://img.youtube.com/vi/QxNd1xCBHhE/maxresdefault.jpg)](https://www.youtube.com/watch?v=QxNd1xCBHhE)
 
-https://github.com/user-attachments/assets/ed163e69-4a74-4b88-9f53-636dfb33ee25
-
-
-
+*This video demonstrates the final output of the solution, featuring subtitles created by this project. 
 [[Link to Original Video](https://www.youtube.com/watch?v=cWexFmUagsc)] 
-
-*This video demonstrates the final output of the solution, featuring subtitles created by this project. (video compressed for uploading)*
-
 
 
 ## How it Works
