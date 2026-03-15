@@ -33,7 +33,7 @@ def _parse_arguments() -> argparse.Namespace:
     parser.add_argument("--target_language", default="Traditional Chinese (Taiwan)",
                         help="The target language for translation.")
     parser.add_argument("--translation_model",
-                        default="google/gemini-2.5-pro", help="The model for translation.")
+                        default="google/gemini-3.1-pro-preview", help="The model for translation.")
     parser.add_argument("--time_buffer", type=float, default=0.1,
                         help="Buffer time between subtitles in seconds.")
     parser.add_argument("--input_dir", default="input",
