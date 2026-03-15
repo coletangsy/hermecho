@@ -19,3 +19,6 @@ references/
 
 # Design file
 DESIGN.md
+docs/*
+!docs/plans/
+
