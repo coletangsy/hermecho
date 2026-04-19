@@ -4,11 +4,15 @@ This module contains functions for translating text.
 import os
 import json
 import re
-from typing import Optional, List, Dict
+from typing import Any, Dict, List, Optional, Tuple
+
+from langchain_core.messages import AIMessage
 from langchain_core.prompts import ChatPromptTemplate
-from langchain_core.output_parsers import StrOutputParser
 from langchain_openai import ChatOpenAI
 from tqdm import tqdm
+
+from openrouter_fallback import openrouter_models_with_fallback
+from transcription import get_openrouter_http_referer
 
 
 # Constants for the sliding window approach
@@ -18,13 +22,94 @@ CHUNK_SIZE = 200          # Number of segments per chunk, increased for better p
 OVERLAP_SIZE = 3         # Number of segments to overlap
 
 
+def _merge_api_usage_tokens(
+    totals: Dict[str, int],
+    usage: Optional[Dict[str, Any]],
+) -> None:
+    """Accumulate OpenAI/OpenRouter-style token_usage into totals."""
+    if not usage or not isinstance(usage, dict):
+        return
+    for key in ("prompt_tokens", "completion_tokens", "total_tokens"):
+        val = usage.get(key)
+        if val is not None:
+            totals[key] = totals.get(key, 0) + int(val)
+
+
+def _log_translation_api_tokens(
+    label: str,
+    usage: Optional[Dict[str, Any]],
+) -> None:
+    """Print token usage from a chat completion (OpenRouter / OpenAI shape)."""
+    if not usage:
+        print(f"{label}: (no usage metadata)")
+        return
+    pt = usage.get("prompt_tokens")
+    ct = usage.get("completion_tokens")
+    tt = usage.get("total_tokens")
+    parts = []
+    if pt is not None:
+        parts.append(f"prompt_tokens={pt}")
+    if ct is not None:
+        parts.append(f"completion_tokens={ct}")
+    if tt is not None:
+        parts.append(f"total_tokens={tt}")
+    if parts:
+        print(f"{label}: " + ", ".join(parts))
+    else:
+        print(f"{label}: usage={usage!r}")
+
+
+def _usage_from_langchain_message(message: Any) -> Optional[Dict[str, Any]]:
+    """
+    Extract token usage from an AIMessage (LangChain OpenAI-compatible).
+
+    OpenRouter typically surfaces usage under response_metadata['token_usage'].
+    Some stacks use usage_metadata with input_tokens / output_tokens.
+    """
+    if message is None:
+        return None
+    meta = getattr(message, "response_metadata", None) or {}
+    u = meta.get("token_usage")
+    if isinstance(u, dict) and u:
+        return dict(u)
+    um = getattr(message, "usage_metadata", None)
+    if isinstance(um, dict) and um:
+        out: Dict[str, Any] = {}
+        if "input_tokens" in um:
+            out["prompt_tokens"] = um["input_tokens"]
+        if "output_tokens" in um:
+            out["completion_tokens"] = um["output_tokens"]
+        if "total_tokens" in um:
+            out["total_tokens"] = um["total_tokens"]
+        return out if out else dict(um)
+    return None
+
+
+def _message_content_to_text(message: Any) -> str:
+    """Best-effort string content from an AIMessage or similar."""
+    if isinstance(message, AIMessage):
+        raw = message.content
+        if isinstance(raw, str):
+            return raw
+        if isinstance(raw, list):
+            parts: List[str] = []
+            for block in raw:
+                if isinstance(block, str):
+                    parts.append(block)
+                elif isinstance(block, dict) and block.get("type") == "text":
+                    parts.append(str(block.get("text", "")))
+            return "".join(parts)
+        return str(raw)
+    return str(message)
+
+
 def _translate_chunk(
     chunk_segments: List[Dict],
     target_language: str,
     translation_model: str,
     reference_material: Optional[str],
-    context: Dict[str, str]
-) -> Optional[List[str]]:
+    context: Dict[str, str],
+) -> Tuple[Optional[List[str]], Optional[Dict[str, Any]]]:
     """
     Translates a single chunk of subtitle segments using a language model.
 
@@ -39,7 +124,7 @@ def _translate_chunk(
         context: A dictionary containing 'prev' and 'next' text for contextual awareness.
 
     Returns:
-        A list of translated text segments, or None if a translation error occurs.
+        (translated strings, token_usage) or (None, usage) on failure.
     """
     # Serialize the main text segments into a JSON array string
     main_text_list = [seg["text"] for seg in chunk_segments]
@@ -64,6 +149,22 @@ def _translate_chunk(
         "4. **Translate Names to English**: If a word is a person's name from the reference material, you MUST translate it to their official English Stage Name (e.g., '윤서연' -> 'Yoon SeoYeon'). Do not keep it in Korean.\n"
         "5. **Intelligent Correction**: The transcription from the speech-to-text model may have errors. If you find a word that is likely a misspelled or partial version of a name from the **Reference Material** (e.g., the text says '유연' when the context suggests the member '김유연'), you MUST correct it to the full, proper name from the reference list.\n"
         "6. **Preserve Original Tone**: Maintain the original meaning and natural tone of the dialogue.\n"
+        "7. **Korean short-form and 반말 (directness)**: When Korean uses "
+        "informal **반말**, dropped verb endings, heavy ellipsis, slang, "
+        "or telegraphic phrasing, translate with a **similarly direct** "
+        f"equivalent in {target_language}—contractions, informal register "
+        "where natural, and **minimal padding** of implied subjects or "
+        "politeness. Do not expand short lines into long formal sentences "
+        "unless the source clearly signals that level of formality.\n"
+        "8. **Korean terms & direct rendering**: For fixed names, stage names, "
+        "group or show titles, slogans, and any glossary-style entries in the "
+        "**Reference Material**, use that material's **canonical wording** "
+        "in the target language — prefer a **direct, conventional** "
+        "rendering over creative paraphrase. For Korean **loanwords** "
+        "already written in Latin letters in the transcript, match official "
+        "or reference spellings; do not invent alternate forms. When the "
+        "same Korean term has one standard fan or industry translation, "
+        "use it consistently across segments.\n"
     )
 
     if reference_material:
@@ -83,44 +184,68 @@ def _translate_chunk(
     )
 
     prompt = ChatPromptTemplate.from_template(prompt_template)
-    model = ChatOpenAI(
-        model=translation_model,
-        openai_api_key=os.getenv("OPENROUTER_API_KEY"),
-        openai_api_base="https://openrouter.ai/api/v1",
-        default_headers={
-            "HTTP-Referer": "http://localhost:3000",
-            "X-Title": "Video Translator"
-        },
-        model_kwargs={"response_format": {"type": "json_object"}}
-    )
-    output_parser = StrOutputParser()
-    chain = prompt | model | output_parser
 
-    try:
-        # Invoke the translation
-        response_text = chain.invoke({"text": main_text_json})
-
-        response_json = json.loads(response_text)
-        translated_segments = response_json['translations']
-
-        if len(translated_segments) != len(chunk_segments):
+    models = openrouter_models_with_fallback(translation_model)
+    last_usage: Optional[Dict[str, Any]] = None
+    for attempt, model_id in enumerate(models):
+        if attempt > 0:
             print(
-                f"Warning: Mismatch in segment count for a chunk. Expected {len(chunk_segments)}, got {len(translated_segments)}.")
-            return None
+                f"Translation: primary model failed for this chunk; "
+                f"retrying with fallback ({model_id})..."
+            )
+        model = ChatOpenAI(
+            model=model_id,
+            temperature=0,
+            openai_api_key=os.getenv("OPENROUTER_API_KEY"),
+            openai_api_base="https://openrouter.ai/api/v1",
+            default_headers={
+                "HTTP-Referer": get_openrouter_http_referer(),
+                "X-Title": "Hermecho Translation",
+            },
+            model_kwargs={"response_format": {"type": "json_object"}},
+        )
+        runnable = prompt | model
 
-        return translated_segments
+        try:
+            message = runnable.invoke({})
+            usage = _usage_from_langchain_message(message)
+            last_usage = usage
+            _log_translation_api_tokens("Translation API tokens", usage)
+            response_text = _message_content_to_text(message)
 
-    except json.JSONDecodeError:
-        print("Warning: Failed to decode JSON from the model's response.")
-        return None
-    except Exception as e:
-        print(f"An unexpected error occurred during chunk translation: {e}")
-        return None
+            response_json = json.loads(response_text)
+            translated_segments = response_json["translations"]
+
+            if len(translated_segments) != len(chunk_segments):
+                print(
+                    "Warning: Mismatch in segment count for a chunk. "
+                    f"Expected {len(chunk_segments)}, got "
+                    f"{len(translated_segments)}."
+                )
+                if attempt + 1 < len(models):
+                    continue
+                return None, usage
+
+            return translated_segments, usage
+
+        except json.JSONDecodeError:
+            print("Warning: Failed to decode JSON from the model's response.")
+            if attempt + 1 < len(models):
+                continue
+            return None, last_usage
+        except Exception as e:
+            print(f"An unexpected error occurred during chunk translation: {e}")
+            if attempt + 1 < len(models):
+                continue
+            return None, last_usage
 
 
-
-
-def translate_segments(segments: List[Dict], target_language: str, translation_model: str, reference_material: Optional[str]) -> Optional[List[Dict]]:
+def translate_segments(
+    segments: List[Dict],
+    target_language: str,
+    translation_model: str,
+    reference_material: Optional[str],
+) -> Optional[List[Dict]]:
     """
     Translates transcribed text segments using an optimized, two-layer strategy.
     
@@ -150,27 +275,43 @@ def translate_segments(segments: List[Dict], target_language: str, translation_m
     try:
         # Determine strategy
         use_sliding_window = False
-        
+        usage_totals: Dict[str, int] = {}
+
         if total_length < TOKEN_THRESHOLD:
-            print("Text is short enough. Attempting to translate in a single batch.")
-            translated_segments_text = _translate_chunk(
-                segments, target_language, translation_model, reference_material, context={}
+            print(
+                "Text is short enough. Attempting to translate in a "
+                "single batch."
             )
-            
+            translated_segments_text, chunk_usage = _translate_chunk(
+                segments,
+                target_language,
+                translation_model,
+                reference_material,
+                context={},
+            )
+            _merge_api_usage_tokens(usage_totals, chunk_usage)
+
             if translated_segments_text is None:
-                print("Single batch translation failed (likely segment mismatch). Falling back to sliding window strategy.")
+                print(
+                    "Single batch translation failed (likely segment mismatch). "
+                    "Falling back to sliding window strategy."
+                )
                 use_sliding_window = True
         else:
             print("Text is too long, using sliding window translation.")
             use_sliding_window = True
 
         # Strategy 2: Sliding Window (Chunks)
-        # This runs if the text was too long initially, OR if the single batch attempt failed.
+        # This runs if the text was too long initially, OR if the single batch
+        # attempt failed.
         if use_sliding_window:
-            translated_segments_text = [] # Reset in case partial data exists
+            translated_segments_text = []
             num_chunks = (num_segments + CHUNK_SIZE - 1) // CHUNK_SIZE
 
-            for i in tqdm(range(num_chunks), desc="Translating in chunks"):
+            for i in tqdm(
+                range(num_chunks),
+                desc="Translating in chunks",
+            ):
                 start_index = i * CHUNK_SIZE
                 end_index = min(start_index + CHUNK_SIZE, num_segments)
                 chunk = segments[start_index:end_index]
@@ -187,35 +328,60 @@ def translate_segments(segments: List[Dict], target_language: str, translation_m
                     'next': "\n".join([seg["text"] for seg in next_context_segments])
                 }
 
-                # Primary strategy for chunk
-                translated_chunk = _translate_chunk(
-                    chunk, target_language, translation_model, reference_material, context
+                translated_chunk, u = _translate_chunk(
+                    chunk,
+                    target_language,
+                    translation_model,
+                    reference_material,
+                    context,
                 )
+                _merge_api_usage_tokens(usage_totals, u)
 
                 # Fallback strategy for chunk (only if chunk fails)
                 if translated_chunk is None:
-                    print(f"Warning: Chunk {i} failed. Attempting to split into smaller sub-chunks (size 50).")
+                    print(
+                        f"Warning: Chunk {i} failed. Attempting to split "
+                        "into smaller sub-chunks (size 50)."
+                    )
                     translated_chunk = []
                     sub_chunk_size = 50
-                    
-                    # Level 2: Split into chunks of 50
+
                     for j in range(0, len(chunk), sub_chunk_size):
-                        sub_chunk = chunk[j : j + sub_chunk_size]
-                        # We reuse the main context for simplicity.
-                        sub_result = _translate_chunk(sub_chunk, target_language, translation_model, reference_material, context)
-                        
+                        sub_chunk = chunk[j: j + sub_chunk_size]
+                        sub_result, su = _translate_chunk(
+                            sub_chunk,
+                            target_language,
+                            translation_model,
+                            reference_material,
+                            context,
+                        )
+                        _merge_api_usage_tokens(usage_totals, su)
+
                         if sub_result is None:
-                            print(f"  Warning: Sub-chunk starting at {j} failed. Splitting into mini-chunks (size 10).")
+                            print(
+                                f"  Warning: Sub-chunk starting at {j} "
+                                "failed. Splitting into mini-chunks "
+                                "(size 10)."
+                            )
                             mini_chunk_size = 10
-                            
-                            # Level 3: Split into chunks of 10
+
                             for k in range(0, len(sub_chunk), mini_chunk_size):
-                                mini_chunk = sub_chunk[k : k + mini_chunk_size]
-                                mini_result = _translate_chunk(mini_chunk, target_language, translation_model, reference_material, context)
-                                
+                                mini_chunk = sub_chunk[k: k + mini_chunk_size]
+                                mini_result, mu = _translate_chunk(
+                                    mini_chunk,
+                                    target_language,
+                                    translation_model,
+                                    reference_material,
+                                    context,
+                                )
+                                _merge_api_usage_tokens(usage_totals, mu)
+
                                 if mini_result is None:
-                                    print(f"    Error: Mini-chunk starting at {k} failed. Skipping translation for this small section.")
-                                    # Last resort: Return empty strings to avoid crashing or misalignment
+                                    print(
+                                        f"    Error: Mini-chunk starting "
+                                        f"at {k} failed. Skipping translation "
+                                        "for this small section."
+                                    )
                                     translated_chunk.extend([""] * len(mini_chunk))
                                 else:
                                     translated_chunk.extend(mini_result)
@@ -225,22 +391,31 @@ def translate_segments(segments: List[Dict], target_language: str, translation_m
                 if translated_chunk:
                     translated_segments_text.extend(translated_chunk)
 
+        _log_translation_api_tokens(
+            "Translation API tokens — cumulative (reported chunks)",
+            usage_totals,
+        )
+
         # Final step: Combine translated text back into the segment structure
         final_segments = []
         for i, segment in enumerate(segments):
             translated_segment = segment.copy()
             original_text = segment.get("text", "").strip()
-            
-            # If the original text was a placeholder for silence, ensure the translation is empty
+            translated_segment["source_text"] = original_text
+
+            # If the original text was a placeholder for silence, ensure the
+            # translation is empty
             if original_text == "[no speech]":
                 translated_segment["text"] = ""
             elif i < len(translated_segments_text):
                 translated_text = translated_segments_text[i]
                 # Clean up punctuation
-                translated_text = translated_text.replace("，", " ").replace("。", " ").strip()
+                translated_text = translated_text.replace("，", " ").replace(
+                    "。", " "
+                ).strip()
                 translated_segment["text"] = translated_text
             else:
-                translated_segment["text"] = "" # Failsafe for any mismatch
+                translated_segment["text"] = ""
             final_segments.append(translated_segment)
 
         print("Text translated successfully.")

@@ -22,5 +22,5 @@ pydub
 noisereduce
 scipy # A dependency for noisereduce
 
-# For making API calls to translation services
-# openrouter-python # If using OpenRouter
+# For OpenRouter HTTP calls (multimodal transcription)
+requests

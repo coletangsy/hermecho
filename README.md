@@ -8,7 +8,7 @@ This project is a high-performance, command-line tool for translating videos wit
 ## Key Features
 
 *   **Automated End-to-End Pipeline:** From video input to a final, subtitled video output with minimal user intervention.
-*   **High-Quality Transcription:** Utilizes a local instance of OpenAI's **Whisper** model for accurate speech-to-text with timestamps.
+*   **High-Quality Transcription:** Defaults to **OpenRouter multimodal** (chunked audio) for timestamps; optional local **Whisper** via `--whisper` when you want an offline or API-free transcribe step.
 *   **Intelligent, Context-Aware Translation:** Employs a Large Language Model (e.g., Gemini 2.5 Pro) with a highly optimized prompt that performs several advanced tasks:
     *   **Contextual Correction:** Uses a reference file to intelligently correct transcription errors in names and key terminology.
     *   **Smart Name Handling:** Translates names to official English stage names and preserves specific English terms.
@@ -16,8 +16,10 @@ This project is a high-performance, command-line tool for translating videos wit
     *   **Adaptive Batch Processing:** Automatically selects the best strategy (single batch vs. sliding window) based on text length.
     *   **Multi-Level Fallback:** If a translation chunk fails, it recursively splits into smaller batches (50 -> 10 segments) to isolate and resolve issues without failing the whole process.
 *   **Enhanced Transcription:**
-    *   **Context-Aware Prompting:** Extracts keywords from reference materials to guide Whisper, improving accuracy for specific terms and names.
+    *   **OpenRouter multimodal or Whisper:** By default, chunked audio goes through an OpenRouter audio-capable model; pass **`--whisper`** to transcribe locally instead.
+    *   **Context-Aware Prompting:** Extracts keywords from reference materials to guide the transcription prompt, improving accuracy for specific terms and names.
     *   **Segment Optimization:** Automatically splits overly long segments for better subtitle readability.
+    *   **Timing review (default):** After translation, a multimodal pass refines subtitle start/end times against the audio (extra API usage). Pass **`--no-timing-review`** to skip it.
 *   **Customizable Subtitles:**
     *   **Styling Options:** Supports custom fonts, sizes, outlines, and background boxes for professional-looking subtitles.
     *   **Versioning:** Output files are timestamped to prevent overwriting and allow easy version tracking.
@@ -38,12 +40,12 @@ This project is a high-performance, command-line tool for translating videos wit
 The video translation process is a multi-stage pipeline designed for quality and robustness:
 
 1.  **Audio Extraction:** The audio is extracted from the input video using `ffmpeg`.
-2.  **Transcription:** The Korean audio is transcribed using a local **Whisper** model, primed with context-specific keywords extracted from reference files.
+2.  **Transcription:** Audio is transcribed with **OpenRouter multimodal** chunked requests by default (or **local Whisper** with `--whisper`), using an initial prompt plus keywords from the reference file when available.
 3.  **Refinement:** Long segments are split for readability, and significant time gaps are filled with placeholders.
 4.  **Intelligent Translation:** The text segments are sent to an LLM. The system employs a robust strategy:
     *   **Adaptive Batching:** Attempts single-batch translation for shorter texts.
     *   **Sliding Window with Fallback:** For longer texts or failed batches, it uses a sliding window approach. If a chunk fails, it recursively breaks it down into smaller sub-chunks to ensure completion.
-5.  **Subtitle Generation:** The translated and corrected text segments are used to generate a final `.srt` subtitle file.
+5.  **Subtitle Generation:** Translated segments become a timestamped `.srt`. **Timing review** runs by default (skip with `--no-timing-review`) to realign cue times to the audio. On the **Whisper** path, `adjust_subtitle_timing` then applies `--time_buffer` between cues; the default multimodal path does not run that stretch and keeps the reviewed (or translated) segment times.
 6.  **Video Finalization:** A new video file is created with the generated subtitles burned directly into it, applying custom styling (font, size, background).
 
 ## Getting Started
@@ -61,46 +63,127 @@ The video translation process is a multi-stage pipeline designed for quality and
     cd hermecho
     ```
 
-2.  **Install the required Python packages:**
+2.  **Create and use a virtual environment** (recommended; keeps dependencies out of your system Python and matches paths ignored by Git, such as `.venv/`):
+    ```bash
+    python3 -m venv .venv
+    source .venv/bin/activate   # Windows: .venv\Scripts\activate
+    ```
+
+3.  **Install the required Python packages:**
     ```bash
     pip install -r requirements.txt
     ```
-    *Note: The `requirements.txt` file needs to be created or updated. Key dependencies include `openai-whisper`, `langchain`, `langchain-openai`, `pydub`, `noisereduce`, `tqdm`, and `python-dotenv`.*
 
-3.  **Create a `.env` file** in the root directory to store your API key:
+4.  **Create a `.env` file** in the root directory with your OpenRouter API key. The default pipeline uses OpenRouter for **multimodal transcription**, **translation**, and **timing review** (skip with **`--no-timing-review`**). With **`--whisper`**, transcription is local; the full pipeline still uses OpenRouter for translation and timing review unless you add **`--no-timing-review`**. **`python src/main.py clip.mp4 --whisper --transcribe-only`** never calls OpenRouter.
     ```
     OPENROUTER_API_KEY="your_openrouter_api_key"
     ```
 
+### Running tests
+
+Unit tests live under `tests/`. Install **pytest** (not listed in `requirements.txt`; add it only in your venv for development), then run from the repository root with `src` on `PYTHONPATH` so imports match the CLI:
+
+```bash
+pip install pytest
+PYTHONPATH=src python -m pytest tests/ -v
+```
+
+Pytest writes cache under `.pytest_cache/`; that directory is listed in `.gitignore` alongside typical virtualenv folders (`.venv/`, `venv/`, etc.).
+
 ## Usage
 
-To translate a video, run the `main.py` script from the `src` directory:
+Place your source file under `input/` (or set `--input_dir`), then run the CLI from the **repository root** so imports resolve correctly:
 
 ```bash
 python src/main.py my_video.mp4
 ```
 
-### Command-Line Arguments
+That runs the **full pipeline**: extract audio → transcribe → (optional source SRT) → translate → subtitle timing → write SRT → burn subtitles into a new MP4 under `output/<video_basename>/`.
 
-You can customize the process using several optional arguments:
+### Quick examples
 
-*   `--model`: The Whisper model to use for transcription (e.g., `base`, `small`, `medium`, `large`). Default is `large`.
-*   `--language`: The language of the audio. Default is `ko`.
-*   `--target_language`: The target language for translation. Default is `Traditional Chinese (Taiwan)`.
-*   `--reference_file`: Path to a reference file (e.g., a list of names) to improve translation accuracy.
-*   `--initial_prompt`: Initial prompt to guide Whisper (e.g., context or style instructions).
-*   `--temperature`: Whisper sampling temperature (0.0 for deterministic, higher for creativity).
-*   `--font_name`: Font name for subtitles (default: "PingFang TC").
-*   `--font_size`: Font size for subtitles (default: 12).
-*   `--outline_width`: Subtitle outline width (0 for no outline).
-*   `--box_background`: Use a black box background for subtitles (default: True).
-*   `--time_buffer`: Buffer time between subtitles in seconds (default: 0.1).
-
-For more information, run:
+**Default (OpenRouter multimodal transcribe, translate, burn-in)**
 
 ```bash
-python src/main.py --help
+python src/main.py episode01.mp4
 ```
+
+**Transcription only (Korean SRT, no translation or video)**
+
+```bash
+python src/main.py clip.mp4 --transcribe-only
+```
+
+**Local Whisper instead of multimodal** (same translation and burn steps unless `--transcribe-only`)
+
+```bash
+python src/main.py clip.mp4 --whisper
+```
+
+**Override multimodal model**
+
+```bash
+python src/main.py clip.mp4 \
+  --multimodal-model google/gemini-3.1-flash-lite-preview
+```
+
+**Keep a source-language SRT alongside the translated run**
+
+```bash
+python src/main.py clip.mp4 --save-source-transcript
+```
+
+**Timing review options** (runs by default after translation; tune model or chunk size)
+
+```bash
+python src/main.py clip.mp4 \
+  --timing-review-model google/gemini-3.1-flash-lite-preview \
+  --timing-review-chunk-seconds 120
+```
+
+**Skip timing review** (faster, fewer API calls)
+
+```bash
+python src/main.py clip.mp4 --no-timing-review
+```
+
+**Custom input/output folders**
+
+```bash
+python src/main.py myfile.mp4 --input_dir ./videos --output_dir ./exports
+```
+
+### Command-line arguments
+
+Run `python src/main.py --help` for the full list. Common options:
+
+| Option | Purpose |
+|--------|---------|
+| `video_filename` | Name of the file inside `--input_dir` (not a full path unless that matches how you set `input_dir`). |
+| `--whisper` | Use local Whisper for transcription instead of the default OpenRouter multimodal path. |
+| `--model` | Whisper size when `--whisper` is set (`tiny` … `large`; default `large`). |
+| `--language` | Source audio language for transcription (default `ko`). |
+| `--multimodal-model` | OpenRouter model id for multimodal transcription (default matches `transcription.DEFAULT_MULTIMODAL_MODEL`, currently Gemini 3.1 Pro preview). If the slug contains `gemini-3.1` and `pro`, multimodal **transcription** retries once with `openai/gpt-audio`; other OpenRouter calls (e.g. translation, timing review) use `openai/gpt-5.4` for the same Pro family. If the slug contains `gemini-3.1` and `flash`, retries use `openai/gpt-5.4-mini`. |
+| `--transcribe-only` | Stop after source-language SRT; no translation or burn-in. |
+| `--save-source-transcript` | With the full pipeline, also writes `*_transcript_source.srt` before translation. |
+| `--target_language` | Translation target (default `Traditional Chinese (Taiwan)`). |
+| `--translation_model` | OpenRouter model id for translation (default `google/gemini-3.1-flash-lite-preview`). |
+| `--timing-review` / `--no-timing-review` | Timing refinement after translation is **on** by default (`--no-timing-review` to skip). |
+| `--timing-review-model` | OpenRouter model for timing review (default `google/gemini-3.1-flash-lite-preview`). |
+| `--timing-review-chunk-seconds` | Max seconds of audio per timing-review request (default `120`). |
+| `--reference_file` | Markdown (or other) reference for translation context and Whisper/multimodal prompt keywords (default `references/tripleS.md`). |
+| `--initial_prompt` | Base prompt prepended to transcription (default mentions Korean and English). |
+| `--temperature` | Whisper sampling temperature when using `--whisper` (default `0.0`). |
+| `--time_buffer` | Seconds between subtitle cues after `adjust_subtitle_timing` on the **`--whisper`** path (default `0.1`). Default multimodal transcription skips that pass. |
+| `--input_dir` / `--output_dir` | Override `input` and `output` directories. |
+| `--font_name`, `--font_size`, `--outline_width`, `--box_background` | Subtitle burn-in styling (defaults: PingFang TC, 12, no outline, box background on). |
+
+### Output layout
+
+Under `output/<video_basename>/`, filenames include a timestamp (`YYYYMMDD_HHMMSS`) to avoid overwrites:
+
+*   **Full run:** `<name>_<timestamp>_subtitles.srt`, `<name>_<timestamp>_translated.mp4`, and if `--save-source-transcript` was set, `<name>_<timestamp>_transcript_source.srt`.
+*   **`--transcribe-only`:** `<name>_<timestamp>_transcript.srt` only.
 
 
 ## Project Structure
@@ -125,12 +208,15 @@ The project is organized into a modular structure to separate concerns and impro
 ├── references/           # Directory for context-aware translation files.
 │   └── tripleS.md        # Example reference file containing names or terms.
 │
+├── tests/                # Unit tests (run with pytest; see “Running tests”).
+│
 └── src/                  # Contains all the core application logic.
-    ├── main.py           # Main entry point and orchestrator of the translation pipeline.
-    ├── video_processing.py # Handles all direct video/audio manipulation using ffmpeg.
-    ├── transcription.py  # Manages the audio-to-text process using the Whisper model.
-    ├── translation.py    # Core translation logic, including prompt engineering and LLM communication.
-    ├── subtitles.py      # Logic for generating, cleaning, and adjusting subtitle timings.
-    └── utils.py          # Utility functions, such as loading reference files.
+    ├── main.py             # CLI entry point and pipeline orchestration.
+    ├── video_processing.py # ffmpeg: audio extract, subtitle burn-in.
+    ├── transcription.py    # Whisper and OpenRouter multimodal transcription.
+    ├── translation.py      # LLM translation (OpenRouter via LangChain).
+    ├── subtitles.py        # SRT generation, gaps, segment splits, timing buffers.
+    ├── timing_review.py    # Default post-translation multimodal pass to refine cue times.
+    └── utils.py            # Reference loading and Whisper keyword extraction.
 
 ```

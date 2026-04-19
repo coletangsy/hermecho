@@ -56,7 +56,15 @@ def extract_audio(video_path: str) -> Optional[str]:
         return None
 
 
-def burn_subtitles_into_video(video_path: str, srt_path: str, output_video_path: str, font_name: str = "Helvetica", font_size: int = 24, outline_width: int = 0, use_box_background: bool = False):
+def burn_subtitles_into_video(
+    video_path: str,
+    srt_path: str,
+    output_video_path: str,
+    font_name: str = "Helvetica",
+    font_size: int = 24,
+    outline_width: int = 0,
+    use_box_background: bool = False,
+):
     """
     Burns subtitles from an SRT file into a video.
 

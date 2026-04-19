@@ -2,6 +2,7 @@
 This module contains utility functions for the video translator.
 """
 import os
+import re
 from typing import Optional
 
 
@@ -27,8 +28,6 @@ def load_reference_material(file_path: str) -> Optional[str]:
         print(f"An error occurred while reading the reference file: {e}")
         return None
 
-
-import re
 
 def extract_keywords_for_whisper(file_path: str, max_tokens: int = 200) -> str:
     """
