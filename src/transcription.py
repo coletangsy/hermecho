@@ -1,253 +1,136 @@
 """
 This module contains functions for transcribing audio to text.
 """
-import base64
-import json
 import math
 import os
 import re
 import subprocess
 import tempfile
 import time
+from collections.abc import Callable
 from typing import Any, Dict, List, Optional, Tuple
 
-import requests
+from google import genai
+from google.genai import types
 
-from openrouter_fallback import openrouter_models_with_fallback
-
-# Default multimodal model: Pro for better segment timing (override via CLI).
-# Keep in sync with --multimodal-model default in main.py.
-DEFAULT_MULTIMODAL_MODEL = "google/gemini-3.1-pro-preview"
-# Long files must be split: full-file base64 payloads often hit 502 / 400
-# limits on OpenRouter and upstream providers.
-DEFAULT_MULTIMODAL_CHUNK_SECONDS = 600.0
-OPENROUTER_CHAT_URL = "https://openrouter.ai/api/v1/chat/completions"
-# OpenRouter uses Referer for attribution; README clone URL as default.
-_DEFAULT_OPENROUTER_REFERER = "https://github.com/coletangsy/hermecho"
+from models import TranscriptResponse, seconds_to_srt, srt_to_seconds
+from retry import compute_backoff
 
 
-def get_openrouter_http_referer() -> str:
-    """
-    Return the HTTP-Referer URL for OpenRouter API requests.
+DEFAULT_MULTIMODAL_MODEL = "gemini-3.1-flash-lite-preview"
+DEFAULT_MULTIMODAL_CHUNK_SECONDS = 5.0 * 60.0
 
-    Override with the OPENROUTER_HTTP_REFERER environment variable when
-    routing traffic from a different site or fork.
-
-    Returns:
-        A valid http(s) URL string.
-    """
-    return os.environ.get(
-        "OPENROUTER_HTTP_REFERER",
-        _DEFAULT_OPENROUTER_REFERER,
-    )
+_CHUNK_AUDIO_BITRATE = "32k"
+_CHUNK_AUDIO_CHANNELS = "1"
+_CHUNK_MAX_RETRIES = 3
 
 
-def _merge_openrouter_usage(
-    totals: Dict[str, int],
-    usage: Optional[Dict[str, Any]],
-) -> None:
-    """Add OpenRouter-style usage dict into running totals."""
-    if not usage or not isinstance(usage, dict):
+def _make_gemini_client() -> genai.Client:
+    api_key = os.getenv("GEMINI_API_KEY")
+    if not api_key:
+        raise ValueError("GEMINI_API_KEY is not set.")
+    return genai.Client(api_key=api_key)
+
+
+def _log_gemini_token_usage(label: str, response: Any) -> None:
+    """Print token counts from a Gemini SDK response's usage_metadata."""
+    um = getattr(response, "usage_metadata", None)
+    if um is None:
+        print(f"{label}: (no usage metadata)")
         return
-    for key in ("prompt_tokens", "completion_tokens", "total_tokens"):
-        val = usage.get(key)
-        if val is not None:
-            totals[key] = totals.get(key, 0) + int(val)
-
-
-def _log_openrouter_token_usage(
-    label: str,
-    usage: Optional[Dict[str, Any]],
-) -> None:
-    """Print token usage from an OpenRouter chat completion response."""
-    if not usage:
-        print(f"{label}: (no usage in API response)")
-        return
-    pt = usage.get("prompt_tokens")
-    ct = usage.get("completion_tokens")
-    tt = usage.get("total_tokens")
     parts = []
+    pt = getattr(um, "prompt_token_count", None)
+    ct = getattr(um, "candidates_token_count", None)
+    tt = getattr(um, "total_token_count", None)
     if pt is not None:
-        parts.append(f"prompt_tokens={pt}")
+        parts.append(f"promptTokenCount={pt}")
     if ct is not None:
-        parts.append(f"completion_tokens={ct}")
+        parts.append(f"candidatesTokenCount={ct}")
     if tt is not None:
-        parts.append(f"total_tokens={tt}")
+        parts.append(f"totalTokenCount={tt}")
     if parts:
         print(f"{label}: " + ", ".join(parts))
     else:
-        print(f"{label}: usage={usage!r}")
+        print(f"{label}: (empty usage metadata)")
 
 
-def transcribe_audio(
-    audio_path: str,
-    model: str,
-    language: str,
-    initial_prompt: Optional[str] = None,
-    temperature: float = 0.0,
-) -> Optional[List[Dict]]:
-    """
-    Transcribes audio using the local OpenAI Whisper model.
-
-    Args:
-        audio_path: Path to the audio file.
-        model: Whisper model size name (e.g. 'large').
-        language: Source language code for Whisper.
-        initial_prompt: Optional context string.
-        temperature: Whisper sampling temperature.
-
-    Returns:
-        Segment dicts with timestamps, or None on failure.
-    """
-    try:
-        if not os.path.exists(audio_path):
-            print(f"Error: Audio file not found at {audio_path}")
-            return None
-
-        import whisper  # type: ignore
-
-        print(f"Loading local Whisper model ({model})...")
-        model = whisper.load_model(model)
-
-        print(f"Transcribing audio locally (language: {language})...")
-        if initial_prompt:
-            print(f"Using initial prompt: {initial_prompt}")
-
-        result = model.transcribe(  # type: ignore
-            audio_path,
-            language=language,
-            word_timestamps=True,
-            verbose=True,
-            fp16=False,
-            initial_prompt=initial_prompt,
-            carry_initial_prompt=True,
-            temperature=temperature,
-            condition_on_previous_text=False,
-            no_speech_threshold=0.85,
-            compression_ratio_threshold=1.7,
-        )
-
-        if not result["segments"]:
-            detected_language = result.get("language", "unknown")
-            print("Warning: Whisper model returned no transcription segments.")
-            print(f"  - Detected language: {detected_language}")
-            print(
-                "  - This could be due to no speech, or the language "
-                f"'({language})' being incorrect."
-            )
-            return []
-
-        print("Audio transcribed successfully")
-        print("Transcription: local Whisper (no API token usage).")
-        return result["segments"]
-
-    except (FileNotFoundError, RuntimeError) as e:
-        print(f"An error occurred during local audio transcription: {e}")
-        return None
-
-
-def _infer_openrouter_audio_format(audio_path: str) -> str:
-    """
-    Map a file extension to OpenRouter input_audio format string.
-
-    Unknown extensions default to mp3 (matches typical ffmpeg extract).
-    """
+def _infer_gemini_inline_audio_mime_type(audio_path: str) -> str:
+    """Map a file extension to a MIME type for Gemini audio parts."""
     ext = os.path.splitext(audio_path)[1].lower().lstrip(".")
-    if ext in ("wav", "mp3", "m4a", "aac", "flac", "ogg", "opus"):
-        return ext if ext != "aac" else "m4a"
-    return "mp3"
+    if ext in ("mp3", "mpeg"):
+        return "audio/mpeg"
+    if ext == "wav":
+        return "audio/wav"
+    if ext in ("m4a", "aac", "mp4"):
+        return "audio/mp4"
+    if ext == "flac":
+        return "audio/flac"
+    if ext in ("ogg", "opus"):
+        return "audio/ogg"
+    return "audio/mpeg"
 
 
-def _json_object_response_format_for_model(
-    model_id: str,
-) -> Optional[Dict[str, str]]:
-    """
-    Return OpenAI-style ``response_format`` for ``json_object`` mode, or None.
+def _strip_utf8_bom(text: str) -> str:
+    if text.startswith("\ufeff"):
+        return text[1:]
+    return text
 
-    Some OpenRouter audio routes (notably ``openai/gpt-audio``) return bodies
-    without a standard ``choices`` array when ``response_format`` is set, so
-    we omit it for those models and rely on the prompt for JSON-only output.
-    """
-    m = model_id.strip().lower()
-    if m == "openai/gpt-audio":
+
+def _strip_outer_markdown_json_fence(text: str) -> str:
+    """If ``text`` is wrapped in one markdown fence, unwrap it."""
+    stripped = text.strip()
+    fence = re.match(
+        r"^```(?:json)?\s*([\s\S]*?)\s*```$",
+        stripped,
+        re.IGNORECASE,
+    )
+    if fence:
+        return fence.group(1).strip()
+    return stripped
+
+
+def _first_balanced_json_object_slice(text: str) -> Optional[str]:
+    """Return the substring of the first top-level ``{...}`` balanced for JSON."""
+    start = text.find("{")
+    if start < 0:
         return None
-    return {"type": "json_object"}
+    depth = 0
+    in_string = False
+    escape = False
+
+    for i in range(start, len(text)):
+        ch = text[i]
+        if in_string:
+            if escape:
+                escape = False
+            elif ch == "\\":
+                escape = True
+            elif ch == '"':
+                in_string = False
+            continue
+        if ch == '"':
+            in_string = True
+            continue
+        if ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                return text[start : i + 1]
+    return None
 
 
-def _extract_openrouter_choice_message(
-    body: Any,
-) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
-    """
-    Extract ``choices[0]['message']`` from an OpenRouter chat completion body.
-
-    Args:
-        body: Parsed JSON from the chat completions endpoint.
-
-    Returns:
-        ``(message_dict, None)`` on success, or ``(None, error_detail)``.
-    """
-    if not isinstance(body, dict):
-        return None, "OpenRouter response was not a JSON object"
-    err = body.get("error")
-    if err is not None:
-        if isinstance(err, dict):
-            msg = err.get("message", str(err))
-            code = err.get("code")
-            if code is not None:
-                return None, f"OpenRouter error ({code}): {msg}"
-            return None, f"OpenRouter error: {msg}"
-        return None, f"OpenRouter error: {err}"
-    choices = body.get("choices")
-    if choices is None:
-        keys = ", ".join(sorted(body.keys()))
-        return None, (
-            "OpenRouter response missing 'choices' "
-            f"(top-level keys: {keys or 'none'})"
-        )
-    if not isinstance(choices, list) or len(choices) == 0:
-        return None, (
-            "OpenRouter 'choices' was not a non-empty list "
-            f"(got {type(choices).__name__})"
-        )
-    choice0 = choices[0]
-    if not isinstance(choice0, dict):
-        return None, "OpenRouter choices[0] was not an object"
-    message = choice0.get("message")
-    if not isinstance(message, dict):
-        return None, "OpenRouter choices[0] missing a message object"
-    return message, None
-
-
-def _openrouter_message_content_to_text(content: Any) -> Optional[str]:
-    """
-    Normalize chat ``message["content"]`` to a single string for JSON parse.
-
-    OpenRouter and some upstream APIs return either a string, a list of
-    typed content parts (e.g. ``{"type": "text", "text": "..."}``), or
-    ``None`` when the model omits text (refusal, error, or tool-only).
-
-    Args:
-        content: Raw ``message["content"]`` from the API JSON.
-
-    Returns:
-        Non-empty stripped text, or ``None`` if nothing usable is present.
-    """
-    if content is None:
-        return None
-    if isinstance(content, str):
-        stripped = content.strip()
-        return stripped if stripped else None
-    if isinstance(content, list):
-        parts: List[str] = []
-        for item in content:
-            if isinstance(item, dict):
-                fragment = item.get("text")
-                if isinstance(fragment, str) and fragment:
-                    parts.append(fragment)
-            elif isinstance(item, str) and item:
-                parts.append(item)
-        joined = "".join(parts).strip()
-        return joined if joined else None
+def _coerce_parsed_transcript_root(
+    parsed: Any,
+) -> Optional[Dict[str, Any]]:
+    """Normalize decoded JSON to ``{"segments": [...]}`` when possible."""
+    if isinstance(parsed, dict):
+        return parsed
+    if isinstance(parsed, list):
+        if not parsed:
+            return {"segments": []}
+        if all(isinstance(x, dict) for x in parsed):
+            return {"segments": parsed}
     return None
 
 
@@ -255,35 +138,44 @@ def _parse_json_object_from_model_text(
     raw: Optional[Any],
 ) -> Optional[Dict[str, Any]]:
     """
-    Parse a JSON object from model output, tolerating markdown fences.
+    Parse transcript JSON from model output with several recovery strategies.
 
-    Args:
-        raw: Model output string, or ``None`` / non-string (returns ``None``).
+    Handles UTF-8 BOM, markdown fences, leading/trailing prose, and a top-level
+    segment array instead of an object.
     """
     if raw is None or not isinstance(raw, str):
         return None
-    text = raw.strip()
-    fence = re.match(r"^```(?:json)?\s*([\s\S]*?)\s*```$", text, re.IGNORECASE)
-    if fence:
-        text = fence.group(1).strip()
-    try:
-        parsed = json.loads(text)
-    except json.JSONDecodeError:
-        return None
-    if isinstance(parsed, dict):
-        return parsed
+    text = _strip_utf8_bom(raw.strip())
+    text = _strip_outer_markdown_json_fence(text)
+
+    candidates: List[str] = []
+    if text:
+        candidates.append(text)
+    inner = _first_balanced_json_object_slice(text)
+    if inner and inner not in candidates:
+        candidates.append(inner)
+
+    for candidate in candidates:
+        try:
+            parsed = json.loads(candidate)
+        except json.JSONDecodeError:
+            sliced = _first_balanced_json_object_slice(candidate)
+            if sliced is None or sliced == candidate:
+                continue
+            try:
+                parsed = json.loads(sliced)
+            except json.JSONDecodeError:
+                continue
+        coerced = _coerce_parsed_transcript_root(parsed)
+        if isinstance(coerced, dict):
+            return coerced
     return None
 
 
 def _normalize_multimodal_segments(
     parsed: Dict[str, Any],
 ) -> List[Dict[str, Any]]:
-    """
-    Sort and validate segment dicts from multimodal JSON output.
-
-    Drops entries with non-numeric times or empty text. Fixes inverted
-    start/end when needed (phrase-level timing does not need word keys).
-    """
+    """Sort and validate segment dicts from multimodal JSON output."""
     raw_list = parsed.get("segments")
     if not isinstance(raw_list, list):
         return []
@@ -308,8 +200,6 @@ def _normalize_multimodal_segments(
     return cleaned
 
 
-# Multimodal models often return overlapping or out-of-span times; these
-# bounds keep SRT output monotonic and within the decoded audio window.
 _MIN_MULTIMODAL_SEGMENT_SEC = 0.05
 _MIN_MULTIMODAL_GAP_SEC = 0.02
 
@@ -318,20 +208,7 @@ def _repair_multimodal_segment_times(
     segments: List[Dict[str, Any]],
     clip_end: float,
 ) -> List[Dict[str, Any]]:
-    """
-    Clamp segment times to [0, clip_end] and remove timeline overlaps.
-
-    LLM-produced timestamps are approximate; overlaps confuse downstream
-    subtitle adjustment. This pass is lossy on time only, not on text.
-
-    Args:
-        segments: Clip-relative or already-offset segments (caller sets
-            clip_end to the valid window end in the same time basis).
-        clip_end: Exclusive upper bound for end times (audio duration).
-
-    Returns:
-        New list of segment dicts with repaired start/end.
-    """
+    """Clamp segment times to [0, clip_end] and remove timeline overlaps."""
     if clip_end <= 0 or not segments:
         return [dict(s) for s in segments]
 
@@ -382,11 +259,7 @@ def _finalize_multimodal_segments_for_audio(
     segments: List[Dict[str, Any]],
     audio_path: str,
 ) -> List[Dict[str, Any]]:
-    """
-    Repair multimodal segments using ffprobe duration of the given file.
-
-    If duration cannot be read, returns a shallow copy of the input list.
-    """
+    """Repair multimodal segments using ffprobe duration of the given file."""
     if not segments:
         return []
     clip_end = _audio_duration_seconds(audio_path)
@@ -396,26 +269,16 @@ def _finalize_multimodal_segments_for_audio(
 
 
 def _audio_duration_seconds(audio_path: str) -> Optional[float]:
-    """
-    Return media duration in seconds using ffprobe (no full decode).
-    """
+    """Return media duration in seconds using ffprobe (no full decode)."""
     cmd = [
         "ffprobe",
-        "-v",
-        "error",
-        "-show_entries",
-        "format=duration",
-        "-of",
-        "default=noprint_wrappers=1:nokey=1",
+        "-v", "error",
+        "-show_entries", "format=duration",
+        "-of", "default=noprint_wrappers=1:nokey=1",
         audio_path,
     ]
     try:
-        out = subprocess.run(
-            cmd,
-            check=True,
-            capture_output=True,
-            text=True,
-        )
+        out = subprocess.run(cmd, check=True, capture_output=True, text=True)
         return float(out.stdout.strip())
     except (FileNotFoundError, subprocess.CalledProcessError, ValueError):
         print("Error: ffprobe failed or returned invalid duration.")
@@ -428,25 +291,15 @@ def _ffmpeg_extract_chunk(
     start_sec: float,
     duration_sec: float,
 ) -> bool:
-    """
-    Write one contiguous audio chunk with ffmpeg (re-encode for accuracy).
-    """
+    """Write one contiguous audio chunk with ffmpeg at speech-optimised quality."""
     cmd = [
-        "ffmpeg",
-        "-y",
-        "-hide_banner",
-        "-loglevel",
-        "error",
-        "-i",
-        source_path,
-        "-ss",
-        str(start_sec),
-        "-t",
-        str(duration_sec),
-        "-acodec",
-        "libmp3lame",
-        "-q:a",
-        "2",
+        "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
+        "-i", source_path,
+        "-ss", str(start_sec),
+        "-t", str(duration_sec),
+        "-acodec", "libmp3lame",
+        "-b:a", _CHUNK_AUDIO_BITRATE,
+        "-ac", _CHUNK_AUDIO_CHANNELS,
         output_path,
     ]
     try:
@@ -458,22 +311,44 @@ def _ffmpeg_extract_chunk(
 
 
 def _build_multimodal_prompt(language: str, initial_prompt: Optional[str]) -> str:
-    """
-    Build user instructions for JSON transcript with clip-relative times.
-
-    Segmentation is driven by how speech is delivered (prosody, pauses),
-    not by clock targets: short, readable cues aligned to audible phases.
-    """
+    """Build user instructions for JSON transcript with SRT-format timestamps."""
     parts = [
         "You are a professional transcription assistant.",
         f"The primary language is {language!r}.",
         "Transcribe all intelligible speech.",
-        "Return ONLY valid JSON (no markdown) with this shape:",
-        '{"segments":[{"start":0.0,"end":1.5,"text":"phrase here"}, ...]}',
+        "Output format (strict):",
+        "- Reply with exactly ONE JSON object and nothing else.",
+        "- No markdown code fences (no triple backticks), no labels, and no "
+        "commentary before or after the JSON.",
+        "- Use standard JSON: double-quoted keys and strings; escape internal "
+        'double quotes in transcript text as \\".',
+        '- Top-level object must be: {"segments":[...]}',
+        "- Each segment has three fields: \"start\", \"end\" (SRT timestamp "
+        "strings in HH:MM:SS,mmm format, relative to the start of THIS clip), "
+        'and "text" (the spoken words).',
+        "Example (structure only — times are relative to this clip's start):",
+        '{"segments":['
+        '{"start":"00:00:00,000","end":"00:00:01,200","text":"short phrase"},'
+        '{"start":"00:00:01,500","end":"00:00:03,100","text":"another phrase"}'
+        "]}",
         "Rules:",
-        "- start and end are seconds from the beginning of THIS audio clip.",
+        "- start and end MUST be SRT timestamp strings: HH:MM:SS,mmm "
+        "(zero-padded hours, minutes, seconds, comma then 3-digit milliseconds). "
+        "Example: \"00:00:02,500\" means 2.5 seconds from the clip start.",
+        "- Timestamps must stay within 00:00:00,000 and the length of this clip.",
+        "- Hard limit: every segment MUST be 15 seconds or shorter. "
+        "No exceptions. If a speaker talks continuously for longer than "
+        "15 seconds without stopping, split at the nearest clause boundary "
+        "or breath pause and open a new segment.",
+        "- Target 5–12 seconds per segment. Never produce a single segment "
+        "covering a multi-sentence passage or a long unbroken monologue.",
         "- Segment by how the speaker delivers content (prosodic phrases, "
         "clauses, breaths, short bursts), not by a time quota or clock.",
+        "- Korean speech split cues: conjunctions and discourse markers "
+        "(그래서, 근데, 왜냐면, 그니까, 그러다가, 그래가지고, 해서, 하지만), "
+        "sentence-final endings (-요, -죠, -어요, -거든요, -습니다, -이에요), "
+        "topic/subject particles that open a new clause (은/는 after a pause), "
+        "and any audible pause or in-breath in the recording.",
         "- Prefer several short segments over one long line: each segment "
         "should carry one coherent spoken chunk.",
         "- If one grammatical sentence is spoken in multiple audible phases "
@@ -485,11 +360,9 @@ def _build_multimodal_prompt(language: str, initial_prompt: Optional[str]) -> st
         "- Do not split a single uninterrupted spoken phrase only to shorten "
         "lines; a new segment needs a real audible boundary in the audio.",
         "- Use phrase-level segments (not word-by-word).",
-        "- Times must be non-overlapping and in ascending order.",
-        "- start and end must stay within 0 and the length of this clip.",
+        "- Timestamps must be non-overlapping and in ascending order.",
         "- Omit non-speech; do not invent content.",
-        "Timing quality (derive times from the audio, not from reading "
-        "speed):",
+        "Timing quality (derive times from the audio, not from reading speed):",
         "- start: first instant that phrase is clearly audible; skip "
         "leading silence.",
         "- end: last instant that phrase is still fully audible; never "
@@ -507,157 +380,193 @@ def _build_multimodal_prompt(language: str, initial_prompt: Optional[str]) -> st
     return "\n".join(parts)
 
 
-def _transcribe_clip_openrouter(
+def transcribe_audio(
     audio_path: str,
-    multimodal_model: str,
+    model: str,
+    language: str,
+    initial_prompt: Optional[str] = None,
+    temperature: float = 0.0,
+) -> Optional[List[Dict]]:
+    """
+    Transcribes audio using the local OpenAI Whisper model.
+    """
+    try:
+        if not os.path.exists(audio_path):
+            print(f"Error: Audio file not found at {audio_path}")
+            return None
+
+        import whisper  # type: ignore
+
+        print(f"Loading local Whisper model ({model})...")
+        model = whisper.load_model(model)
+
+        print(f"Transcribing audio locally (language: {language})...")
+        if initial_prompt:
+            print(f"Using initial prompt: {initial_prompt}")
+
+        result = model.transcribe(  # type: ignore
+            audio_path,
+            language=language,
+            word_timestamps=True,
+            verbose=True,
+            fp16=False,
+            initial_prompt=initial_prompt,
+            carry_initial_prompt=True,
+            temperature=temperature,
+            condition_on_previous_text=False,
+            no_speech_threshold=0.85,
+            compression_ratio_threshold=1.7,
+        )
+
+        if not result["segments"]:
+            detected_language = result.get("language", "unknown")
+            print("Warning: Whisper model returned no transcription segments.")
+            print(f"  - Detected language: {detected_language}")
+            print(
+                "  - This could be due to no speech, or the language "
+                f"'({language})' being incorrect."
+            )
+            return []
+
+        print("Audio transcribed successfully")
+        print("Transcription: local Whisper (no API token usage).")
+        return result["segments"]
+
+    except (FileNotFoundError, RuntimeError) as e:
+        print(f"An error occurred during local audio transcription: {e}")
+        return None
+
+
+def _transcribe_clip_gemini_sdk(
+    audio_path: str,
+    gemini_model: str,
     language: str,
     initial_prompt: Optional[str],
-    usage_log_label: str = "Transcription (multimodal) API tokens",
+    usage_log_label: str = "Transcription (Gemini) API tokens",
 ) -> Tuple[Optional[List[Dict[str, Any]]], Optional[Dict[str, Any]]]:
     """
-    One OpenRouter multimodal request for a single audio file path.
+    One Google AI Studio ``generateContent`` call via the google-genai SDK.
 
-    Returns:
-        (segments, usage) where usage is the API's usage object if present,
-        or (None, None) / (None, usage) on failure.
+    Uses pydantic ``response_schema`` (TranscriptResponse) so the SDK enforces
+    the JSON shape and returns a validated ``response.parsed`` object, avoiding
+    manual JSON parsing and thought_signature contamination issues.
     """
-    api_key = os.getenv("OPENROUTER_API_KEY")
-    if not api_key:
-        print("Error: OPENROUTER_API_KEY is not set.")
-        return None, None
-
     try:
-        with open(audio_path, "rb") as f:
-            b64 = base64.standard_b64encode(f.read()).decode("ascii")
-    except OSError as e:
-        print(f"Error: could not read audio file: {e}")
+        client = _make_gemini_client()
+    except ValueError as exc:
+        print(f"Error: {exc}")
         return None, None
 
-    audio_format = _infer_openrouter_audio_format(audio_path)
+    if not os.path.exists(audio_path):
+        print(f"Error: Audio file not found at {audio_path}")
+        return None, None
+
+    mime_type = _infer_gemini_inline_audio_mime_type(audio_path)
     user_text = _build_multimodal_prompt(language, initial_prompt)
 
-    payload: Dict[str, Any] = {
-        "model": multimodal_model,
-        "messages": [
-            {
-                "role": "user",
-                "content": [
-                    {"type": "text", "text": user_text},
-                    {
-                        "type": "input_audio",
-                        "input_audio": {
-                            "data": b64,
-                            "format": audio_format,
-                        },
-                    },
-                ],
-            }
-        ],
-        # Deterministic decoding for stable wording and timing JSON.
-        "temperature": 0,
-    }
-    fmt = _json_object_response_format_for_model(multimodal_model)
-    if fmt is not None:
-        payload["response_format"] = fmt
-
-    headers = {
-        "Authorization": f"Bearer {api_key}",
-        "Content-Type": "application/json",
-        "HTTP-Referer": get_openrouter_http_referer(),
-        "X-Title": "Hermecho Multimodal Transcribe",
-    }
-
-    max_http_attempts = 3
-    backoff_sec = 2.5
-    resp: Optional[requests.Response] = None
-    for http_try in range(max_http_attempts):
-        try:
-            resp = requests.post(
-                OPENROUTER_CHAT_URL,
-                headers=headers,
-                json=payload,
-                timeout=900,
-            )
-        except requests.RequestException as e:
-            print(f"Error: OpenRouter request failed: {e}")
-            return None, None
-
-        if resp.status_code == 200:
-            break
-
-        transient = resp.status_code in (502, 503, 504)
-        if transient and http_try + 1 < max_http_attempts:
+    max_attempts = 4
+    for attempt in range(max_attempts):
+        if attempt > 0:
+            delay = compute_backoff(attempt - 1)
             print(
-                "Warning: OpenRouter returned "
-                f"{resp.status_code}; retrying in {backoff_sec:.0f}s "
-                f"({http_try + 2}/{max_http_attempts})..."
+                f"  Gemini transcription: retrying in {delay:.1f}s "
+                f"({attempt + 1}/{max_attempts})..."
             )
-            time.sleep(backoff_sec)
-            continue
+            time.sleep(delay)
 
-        print(
-            "Error: OpenRouter returned "
-            f"{resp.status_code}: {resp.text[:500]}"
-        )
-        return None, None
+        uploaded_file = None
+        try:
+            try:
+                uploaded_file = client.files.upload(
+                    file=audio_path,
+                    config=types.UploadFileConfig(mime_type=mime_type),
+                )
+                audio_part = types.Part.from_uri(
+                    file_uri=uploaded_file.uri,
+                    mime_type=mime_type,
+                )
+                raw_mb = os.path.getsize(audio_path) / (1024 * 1024)
+                print(f"  File API upload OK ({raw_mb:.1f} MB) → {uploaded_file.uri}")
+            except Exception as upload_exc:
+                raw_mb = os.path.getsize(audio_path) / (1024 * 1024)
+                print(
+                    f"  Warning: File API upload failed ({upload_exc}) for "
+                    f"{raw_mb:.1f} MB chunk; falling back to inline bytes."
+                )
+                with open(audio_path, "rb") as fh:
+                    audio_bytes = fh.read()
+                audio_part = types.Part.from_bytes(
+                    data=audio_bytes, mime_type=mime_type
+                )
+                uploaded_file = None
 
-    if resp is None or resp.status_code != 200:
-        return None, None
+            response = client.models.generate_content(
+                model=gemini_model,
+                contents=[
+                    types.Part.from_text(text=user_text),
+                    audio_part,
+                ],
+                config=types.GenerateContentConfig(
+                    temperature=0,
+                    response_mime_type="application/json",
+                    response_schema=TranscriptResponse,
+                ),
+            )
 
-    try:
-        body = resp.json()
-    except json.JSONDecodeError as e:
-        print(f"Error: invalid JSON from OpenRouter: {e}")
-        return None, None
+            _log_gemini_token_usage(usage_log_label, response)
 
-    usage: Optional[Dict[str, Any]] = None
-    if isinstance(body, dict):
-        raw_usage = body.get("usage")
-        if isinstance(raw_usage, dict):
-            usage = raw_usage
+            transcript: Optional[TranscriptResponse] = response.parsed
+            if transcript is None:
+                print(
+                    "Error: SDK returned no parsed transcript (response_schema "
+                    "validation failed). Raw text preview: "
+                    + repr((response.text or "")[:400])
+                )
+                if attempt + 1 < max_attempts:
+                    continue
+                return None, None
 
-    message, shape_err = _extract_openrouter_choice_message(body)
-    if shape_err is not None or message is None:
-        print(f"Error: {shape_err}")
-        _log_openrouter_token_usage(usage_log_label, usage)
-        return None, usage
+            segments: List[Dict[str, Any]] = []
+            for seg in transcript.segments:
+                try:
+                    start = srt_to_seconds(seg.start)
+                    end = srt_to_seconds(seg.end)
+                except ValueError as ts_err:
+                    print(f"  Warning: skipping segment with bad timestamp: {ts_err}")
+                    continue
+                text = seg.text.strip()
+                if not text:
+                    continue
+                if end < start:
+                    start, end = end, start
+                segments.append({"start": start, "end": end, "text": text})
 
-    choices = body.get("choices")
-    choice0 = choices[0] if isinstance(choices, list) and choices else {}
+            if not segments:
+                print("Warning: Gemini model returned no usable segments.")
+                return [], None
 
-    _log_openrouter_token_usage(usage_log_label, usage)
+            segments = _finalize_multimodal_segments_for_audio(segments, audio_path)
+            return segments, None
 
-    content = _openrouter_message_content_to_text(message.get("content"))
-    if content is None:
-        finish_reason = (
-            choice0.get("finish_reason")
-            if isinstance(choice0, dict)
-            else None
-        )
-        refusal = (
-            message.get("refusal")
-            if isinstance(message, dict)
-            else None
-        )
-        print(
-            "Error: OpenRouter returned no assistant text in "
-            f"choices[0].message (finish_reason={finish_reason!r}, "
-            f"refusal={refusal!r}). The model may have refused the request, "
-            "hit a provider error, or returned an unsupported content shape."
-        )
-        return None, usage
+        except Exception as exc:
+            print(f"Error: Gemini generateContent failed: {exc}")
+            if attempt + 1 < max_attempts:
+                continue
+            return None, None
+        finally:
+            if uploaded_file is not None:
+                try:
+                    client.files.delete(name=uploaded_file.name)
+                except Exception:
+                    pass
 
-    parsed = _parse_json_object_from_model_text(content)
-    if not parsed:
-        print("Error: model output was not valid JSON with a segments list.")
-        return None, usage
+    return None, None
 
-    segments = _normalize_multimodal_segments(parsed)
-    if not segments:
-        print("Warning: multimodal model returned no usable segments.")
-        return [], usage
-    segments = _finalize_multimodal_segments_for_audio(segments, audio_path)
-    return segments, usage
+
+_ClipFn = Callable[
+    [str, str, str, Optional[str]],
+    Tuple[Optional[List[Dict[str, Any]]], Optional[Dict[str, Any]]],
+]
 
 
 def _transcribe_multimodal_by_chunks(
@@ -667,35 +576,27 @@ def _transcribe_multimodal_by_chunks(
     initial_prompt: Optional[str],
     duration_sec: float,
     chunk_seconds: float,
+    transcribe_clip: "_ClipFn",
+    inter_chunk_sleep: float = 2.0,
 ) -> Optional[List[Dict[str, Any]]]:
     """
-    Transcribe long audio via overlapping time windows and ffmpeg chunks.
+    Transcribe long audio via time windows and ffmpeg chunks.
 
-    Each chunk is sent as its own OpenRouter request (smaller payload than
-    one base64 blob for the entire file). Segment times from the model are
-    clip-relative per chunk; this function offsets them to the full timeline.
-
-    Args:
-        audio_path: Full source audio path (used for ffmpeg input and final
-            duration repair).
-        model_id: OpenRouter model slug for this attempt.
-        language: Source language label for the prompt.
-        initial_prompt: Optional user context for the prompt.
-        duration_sec: Total media length in seconds (from ffprobe).
-        chunk_seconds: Window length in seconds (at least 60; caller clamps).
-
-    Returns:
-        Merged segment dicts for the full file, or None if any chunk fails.
+    Each chunk is its own API request. Per-chunk failures are retried up to
+    ``_CHUNK_MAX_RETRIES`` times with exponential backoff; if a chunk still
+    fails after all retries it is skipped with a warning rather than aborting
+    the entire job.
     """
     if chunk_seconds < 60.0:
         return None
 
     n_chunks = int(math.ceil(duration_sec / chunk_seconds))
     merged: List[Dict[str, Any]] = []
+    failed_chunks: List[int] = []
 
     print(
         f"Long audio ({duration_sec:.0f}s): transcribing in up to "
-        f"{n_chunks} chunk(s) of ~{chunk_seconds:.0f}s (API size limits)."
+        f"{n_chunks} chunk(s) of ~{chunk_seconds:.0f}s."
     )
 
     with tempfile.TemporaryDirectory(prefix="hermecho_mm_") as tmpdir:
@@ -705,32 +606,79 @@ def _transcribe_multimodal_by_chunks(
             idx += 1
             span = min(chunk_seconds, duration_sec - offset)
             chunk_path = os.path.join(tmpdir, f"chunk_{idx:04d}.mp3")
-            if not _ffmpeg_extract_chunk(audio_path, chunk_path, offset, span):
-                return None
             t_end = offset + span
-            print(
-                f"  Multimodal chunk {idx}/{n_chunks}: "
-                f"{offset:.0f}s–{t_end:.0f}s..."
-            )
-            segs, _usage = _transcribe_clip_openrouter(
-                chunk_path,
-                model_id,
-                language,
-                initial_prompt,
-            )
+
+            if not _ffmpeg_extract_chunk(audio_path, chunk_path, offset, span):
+                print(
+                    f"  Warning: ffmpeg failed for chunk {idx}/{n_chunks} "
+                    f"({offset:.0f}s–{t_end:.0f}s); skipping."
+                )
+                failed_chunks.append(idx)
+                offset = t_end
+                continue
+
+            try:
+                chunk_mb = os.path.getsize(chunk_path) / (1024 * 1024)
+            except OSError:
+                chunk_mb = 0.0
+
+            segs: Optional[List[Dict[str, Any]]] = None
+            for retry in range(_CHUNK_MAX_RETRIES):
+                print(
+                    f"  Multimodal chunk {idx}/{n_chunks}: "
+                    f"{offset:.0f}s–{t_end:.0f}s ({chunk_mb:.1f} MB)"
+                    + (f" (retry {retry}/{_CHUNK_MAX_RETRIES - 1})" if retry else "")
+                    + "..."
+                )
+                segs, _usage = transcribe_clip(
+                    chunk_path, model_id, language, initial_prompt
+                )
+                if segs is not None:
+                    break
+                if retry + 1 < _CHUNK_MAX_RETRIES:
+                    print(
+                        f"  Chunk {idx} failed; waiting 60s before retry "
+                        f"(rate-limit cooldown)..."
+                    )
+                    time.sleep(60.0)
+
             if segs is None:
-                return None
-            for raw in segs:
-                row = dict(raw)
-                try:
-                    s0 = float(row["start"]) + offset
-                    s1 = float(row["end"]) + offset
-                except (KeyError, TypeError, ValueError):
-                    continue
-                row["start"] = s0
-                row["end"] = s1
-                merged.append(row)
+                print(
+                    f"  Warning: chunk {idx}/{n_chunks} failed after all attempts; "
+                    f"skipping this window ({offset:.0f}s–{t_end:.0f}s)."
+                )
+                failed_chunks.append(idx)
+            else:
+                for raw in segs:
+                    row = dict(raw)
+                    try:
+                        s0 = float(row["start"]) + offset
+                        s1 = float(row["end"]) + offset
+                    except (KeyError, TypeError, ValueError):
+                        continue
+                    row["start"] = s0
+                    row["end"] = s1
+                    merged.append(row)
+                if idx < n_chunks and inter_chunk_sleep > 0:
+                    print(
+                        f"  Waiting {inter_chunk_sleep:.0f}s before next chunk "
+                        "(rate-limit window)..."
+                    )
+                    time.sleep(inter_chunk_sleep)
+
             offset = t_end
+
+    if failed_chunks:
+        pct = 100 * len(failed_chunks) / n_chunks
+        print(
+            f"Warning: {len(failed_chunks)}/{n_chunks} chunk(s) failed "
+            f"({pct:.0f}% of audio). Chunks: {failed_chunks}. "
+            "Transcription may have gaps in those windows."
+        )
+
+    if not merged and failed_chunks:
+        print("Error: all transcription chunks failed; returning None.")
+        return None
 
     merged = _finalize_multimodal_segments_for_audio(merged, audio_path)
     return merged
@@ -744,20 +692,18 @@ def transcribe_audio_multimodal(
     chunk_seconds: float = DEFAULT_MULTIMODAL_CHUNK_SECONDS,
 ) -> Optional[List[Dict[str, Any]]]:
     """
-    Transcribe audio via OpenRouter using a multimodal model (e.g. Gemini).
+    Transcribe audio with a Gemini multimodal model via Google AI Studio.
 
-    Segments are prompted as short, phase-aligned cues (natural pauses and
-    prosody), not fixed-duration slices.
-
-    Long files are split with ffmpeg into multiple requests (default chunk
-    length ``DEFAULT_MULTIMODAL_CHUNK_SECONDS``) so payloads stay within
-    gateway and provider limits. Pass ``chunk_seconds=0`` to force a single
-    request for the entire file (not recommended for long media).
+    Uses the google-genai SDK with the File API for audio upload. Long files
+    are split with ffmpeg into multiple requests (default chunk length
+    ``DEFAULT_MULTIMODAL_CHUNK_SECONDS``) so payloads stay within limits.
+    Pass ``chunk_seconds=0`` to force a single request for the entire file
+    (not recommended for long media).
 
     Args:
         audio_path: Path to audio (e.g. ffmpeg-extracted MP3).
         language: BCP-47 or short label (e.g. 'ko') for prompting.
-        multimodal_model: OpenRouter model id.
+        multimodal_model: Gemini model id (e.g. 'gemini-3.1-flash-lite-preview').
         initial_prompt: Optional domain context (names, mixed languages).
         chunk_seconds: Max seconds per API request; ``0`` disables chunking.
 
@@ -777,44 +723,25 @@ def transcribe_audio_multimodal(
         eff_chunk = max(60.0, float(chunk_seconds))
     use_chunks = eff_chunk > 0 and duration > eff_chunk
 
-    models = openrouter_models_with_fallback(
-        multimodal_model,
-        multimodal_transcription=True,
+    mode = f"~{eff_chunk:.0f}s chunks" if use_chunks else "single request"
+    print(
+        f"Transcribing with multimodal model ({multimodal_model}) via "
+        f"Google AI Studio, {duration:.0f}s audio ({mode})..."
     )
-    for attempt, model_id in enumerate(models):
-        if attempt == 0:
-            mode = (
-                f"~{eff_chunk:.0f}s chunks"
-                if use_chunks
-                else "single request"
-            )
-            print(
-                f"Transcribing with multimodal model ({model_id}), "
-                f"{duration:.0f}s audio ({mode})..."
-            )
-        else:
-            print(
-                f"Primary multimodal model failed; retrying with fallback "
-                f"({model_id})..."
-            )
 
-        if use_chunks:
-            segs = _transcribe_multimodal_by_chunks(
-                audio_path,
-                model_id,
-                language,
-                initial_prompt,
-                duration,
-                eff_chunk,
-            )
-        else:
-            segs, _usage = _transcribe_clip_openrouter(
-                audio_path,
-                model_id,
-                language,
-                initial_prompt,
-            )
-
-        if segs is not None:
-            return segs
-    return None
+    if use_chunks:
+        return _transcribe_multimodal_by_chunks(
+            audio_path,
+            multimodal_model,
+            language,
+            initial_prompt,
+            duration,
+            eff_chunk,
+            _transcribe_clip_gemini_sdk,
+            inter_chunk_sleep=60.0,
+        )
+    else:
+        segs, _usage = _transcribe_clip_gemini_sdk(
+            audio_path, multimodal_model, language, initial_prompt
+        )
+        return segs

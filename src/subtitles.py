@@ -2,38 +2,91 @@
 This module contains functions for generating, adjusting, and cleaning subtitles.
 """
 import logging
+import math
+from typing import Dict, List
 
 
-def split_long_segments(segments: list[dict], max_chars: int = 40, max_duration: float = 7.0) -> list[dict]:
+def _split_no_words(seg: Dict, max_chars: int, max_duration: float) -> List[Dict]:
     """
-    Splits segments that are too long in character count or duration.
-    Requires segments to have 'words' with timestamps (from Whisper word_timestamps=True).
-    
-    Args:
-        segments: List of transcription segments.
-        max_chars: Maximum characters allowed per segment.
-        max_duration: Maximum duration (seconds) allowed per segment.
-        
-    Returns:
-        A new list of segments with long ones split.
+    Proportional time split for multimodal segments (no word-level timestamps).
+    Time is distributed linearly by character count as a speech-rate proxy.
+    """
+    text = seg.get("text", "").strip()
+    start = float(seg["start"])
+    end = float(seg["end"])
+    duration = end - start
+
+    if not text or (len(text) <= max_chars and duration <= max_duration):
+        return [seg]
+
+    n_by_duration = math.ceil(duration / max_duration) if max_duration > 0 else 1
+    n_by_chars = math.ceil(len(text) / max_chars) if max_chars > 0 else 1
+    n_splits = max(n_by_duration, n_by_chars, 2)
+    target_chars = math.ceil(len(text) / n_splits)
+
+    tokens = text.split()
+    chunks: List[str] = []
+    current: List[str] = []
+    current_len = 0
+
+    for token in tokens:
+        token_len = len(token) + (1 if current else 0)  # +1 for joining space
+        current.append(token)
+        current_len += token_len
+        if current_len >= target_chars:
+            chunks.append(" ".join(current))
+            current = []
+            current_len = 0
+
+    if current:
+        chunks.append(" ".join(current))
+
+    if not chunks:
+        return [seg]
+
+    total_chars = max(1, len(text))
+    result: List[Dict] = []
+    char_pos = 0
+
+    for i, chunk in enumerate(chunks):
+        chunk_text = chunk.strip()
+        if not chunk_text:
+            continue
+        chunk_start = start + (char_pos / total_chars) * duration
+        char_pos += len(chunk)
+        chunk_end = end if i == len(chunks) - 1 else start + (char_pos / total_chars) * duration
+        result.append({
+            "text": chunk_text,
+            "start": round(chunk_start, 3),
+            "end": round(chunk_end, 3),
+        })
+
+    return result if result else [seg]
+
+
+def split_long_segments(segments: List[Dict], max_chars: int = 40, max_duration: float = 7.0) -> List[Dict]:
+    """
+    Splits segments that exceed ``max_chars`` or ``max_duration``.
+
+    Whisper segments (with per-word timestamps) are split at word boundaries.
+    Multimodal segments (no ``words`` key) fall back to proportional text split
+    via :func:`_split_no_words`.
     """
     split_segments = []
-    
+
     for seg in segments:
         text = seg.get("text", "").strip()
         start = seg["start"]
         end = seg["end"]
         duration = end - start
         words = seg.get("words", [])
-        
-        # If segment is short enough, keep it as is
+
         if len(text) <= max_chars and duration <= max_duration:
             split_segments.append(seg)
             continue
-            
-        # If no word timestamps, we can't split accurately, so keep it (or implement naive time split)
+
         if not words:
-            split_segments.append(seg)
+            split_segments.extend(_split_no_words(seg, max_chars, max_duration))
             continue
             
         # Split logic: Try to split into chunks that fit constraints
@@ -74,10 +127,10 @@ def split_long_segments(segments: list[dict], max_chars: int = 40, max_duration:
 
 
 def fill_transcription_gaps(
-    transcribed_segments: list[dict],
+    transcribed_segments: List[Dict],
     gap_threshold: float = 5.0,
     placeholder: str = "[no speech]",
-) -> list[dict]:
+) -> List[Dict]:
     """
     Identifies and fills significant time gaps in a transcription with placeholder text.
 
@@ -118,7 +171,7 @@ def fill_transcription_gaps(
     return filled_segments
 
 
-def adjust_subtitle_timing(segments: list[dict], time_buffer: float) -> list[dict]:
+def adjust_subtitle_timing(segments: List[Dict], time_buffer: float) -> List[Dict]:
     """
     Adjusts subtitle timings to fill gaps and ensures a consistent reading pace.
 
@@ -162,9 +215,9 @@ def adjust_subtitle_timing(segments: list[dict], time_buffer: float) -> list[dic
 
 
 def generate_srt(
-    segments: list[dict],
+    segments: List[Dict],
     output_path: str,
-):
+) -> None:
     """
     Generates an SRT subtitle file from translated segments.
 
