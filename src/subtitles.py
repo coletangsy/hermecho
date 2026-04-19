@@ -73,7 +73,11 @@ def split_long_segments(segments: list[dict], max_chars: int = 40, max_duration:
     return split_segments
 
 
-def fill_transcription_gaps(transcribed_segments: list[dict], gap_threshold: float = 5.0, placeholder: str = "[no speech]") -> list[dict]:
+def fill_transcription_gaps(
+    transcribed_segments: list[dict],
+    gap_threshold: float = 5.0,
+    placeholder: str = "[no speech]",
+) -> list[dict]:
     """
     Identifies and fills significant time gaps in a transcription with placeholder text.
 
@@ -100,7 +104,9 @@ def fill_transcription_gaps(transcribed_segments: list[dict], gap_threshold: flo
         gap = next_seg["start"] - current_seg["end"]
 
         if gap > gap_threshold:
-            logging.warning(f"Gap of {gap:.2f}s detected. Inserting placeholder.")
+            logging.warning(
+                f"Gap of {gap:.2f}s detected. Inserting placeholder."
+            )
             filled_segments.append({
                 "text": placeholder,
                 "start": current_seg["end"],
@@ -155,7 +161,10 @@ def adjust_subtitle_timing(segments: list[dict], time_buffer: float) -> list[dic
     return adjusted_segments
 
 
-def generate_srt(segments: list[dict], output_path: str):
+def generate_srt(
+    segments: list[dict],
+    output_path: str,
+):
     """
     Generates an SRT subtitle file from translated segments.
 
