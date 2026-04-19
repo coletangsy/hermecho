@@ -120,12 +120,11 @@ python src/main.py clip.mp4 --transcribe-only
 python src/main.py clip.mp4 --whisper
 ```
 
-**Override multimodal model or chunk size**
+**Override multimodal model**
 
 ```bash
 python src/main.py clip.mp4 \
-  --multimodal-model google/gemini-3.1-flash-lite-preview \
-  --chunk-seconds 300
+  --multimodal-model google/gemini-3.1-flash-lite-preview
 ```
 
 **Keep a source-language SRT alongside the translated run**
@@ -164,8 +163,7 @@ Run `python src/main.py --help` for the full list. Common options:
 | `--whisper` | Use local Whisper for transcription instead of the default OpenRouter multimodal path. |
 | `--model` | Whisper size when `--whisper` is set (`tiny` … `large`; default `large`). |
 | `--language` | Source audio language for transcription (default `ko`). |
-| `--multimodal-model` | OpenRouter model id for multimodal transcription (default matches `transcription.DEFAULT_MULTIMODAL_MODEL`, currently Gemini 3.1 Pro preview). |
-| `--chunk-seconds` | Multimodal path only: max seconds per API request; long audio is split with ffmpeg (default `300`; try `180` if requests fail). |
+| `--multimodal-model` | OpenRouter model id for multimodal transcription (default matches `transcription.DEFAULT_MULTIMODAL_MODEL`, currently Gemini 3.1 Pro preview). If the slug contains `gemini-3.1` and `pro`, multimodal **transcription** retries once with `openai/gpt-audio`; other OpenRouter calls (e.g. translation, timing review) use `openai/gpt-5.4` for the same Pro family. If the slug contains `gemini-3.1` and `flash`, retries use `openai/gpt-5.4-mini`. |
 | `--transcribe-only` | Stop after source-language SRT; no translation or burn-in. |
 | `--save-source-transcript` | With the full pipeline, also writes `*_transcript_source.srt` before translation. |
 | `--target_language` | Translation target (default `Traditional Chinese (Taiwan)`). |

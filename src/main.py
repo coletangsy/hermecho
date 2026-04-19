@@ -8,6 +8,7 @@ from dotenv import load_dotenv
 
 from video_processing import extract_audio, burn_subtitles_into_video, is_ffmpeg_installed
 from transcription import (
+    DEFAULT_MULTIMODAL_CHUNK_SECONDS,
     DEFAULT_MULTIMODAL_MODEL,
     transcribe_audio,
     transcribe_audio_multimodal,
@@ -53,12 +54,14 @@ def _parse_arguments() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
-        "--chunk-seconds",
+        "--multimodal-chunk-seconds",
         type=float,
-        default=300.0,
+        default=DEFAULT_MULTIMODAL_CHUNK_SECONDS,
         help=(
-            "Multimodal only: max seconds per API request; longer audio is "
-            "split with ffmpeg. Try 180 if requests fail."
+            "Max seconds of audio per OpenRouter multimodal request "
+            f"(default {DEFAULT_MULTIMODAL_CHUNK_SECONDS:.0f}; minimum 60 "
+            "when chunking). Longer media is split with ffmpeg. Use 0 for "
+            "one request for the entire file (may 502 on long media)."
         ),
     )
     parser.add_argument(
@@ -188,7 +191,7 @@ def _process_video(args: argparse.Namespace):
                 language=args.language,
                 multimodal_model=args.multimodal_model,
                 initial_prompt=full_prompt,
-                chunk_seconds=args.chunk_seconds,
+                chunk_seconds=args.multimodal_chunk_seconds,
             )
         if not transcribed_segments:
             return

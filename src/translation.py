@@ -11,6 +11,7 @@ from langchain_core.prompts import ChatPromptTemplate
 from langchain_openai import ChatOpenAI
 from tqdm import tqdm
 
+from openrouter_fallback import openrouter_models_with_fallback
 from transcription import get_openrouter_http_referer
 
 
@@ -183,44 +184,60 @@ def _translate_chunk(
     )
 
     prompt = ChatPromptTemplate.from_template(prompt_template)
-    model = ChatOpenAI(
-        model=translation_model,
-        temperature=0,
-        openai_api_key=os.getenv("OPENROUTER_API_KEY"),
-        openai_api_base="https://openrouter.ai/api/v1",
-        default_headers={
-            "HTTP-Referer": get_openrouter_http_referer(),
-            "X-Title": "Hermecho Translation",
-        },
-        model_kwargs={"response_format": {"type": "json_object"}}
-    )
-    runnable = prompt | model
 
-    usage: Optional[Dict[str, Any]] = None
-    try:
-        message = runnable.invoke({})
-        usage = _usage_from_langchain_message(message)
-        _log_translation_api_tokens("Translation API tokens", usage)
-        response_text = _message_content_to_text(message)
-
-        response_json = json.loads(response_text)
-        translated_segments = response_json['translations']
-
-        if len(translated_segments) != len(chunk_segments):
+    models = openrouter_models_with_fallback(translation_model)
+    last_usage: Optional[Dict[str, Any]] = None
+    for attempt, model_id in enumerate(models):
+        if attempt > 0:
             print(
-                f"Warning: Mismatch in segment count for a chunk. Expected {len(chunk_segments)}, got {len(translated_segments)}.")
-            return None, usage
+                f"Translation: primary model failed for this chunk; "
+                f"retrying with fallback ({model_id})..."
+            )
+        model = ChatOpenAI(
+            model=model_id,
+            temperature=0,
+            openai_api_key=os.getenv("OPENROUTER_API_KEY"),
+            openai_api_base="https://openrouter.ai/api/v1",
+            default_headers={
+                "HTTP-Referer": get_openrouter_http_referer(),
+                "X-Title": "Hermecho Translation",
+            },
+            model_kwargs={"response_format": {"type": "json_object"}},
+        )
+        runnable = prompt | model
 
-        return translated_segments, usage
+        try:
+            message = runnable.invoke({})
+            usage = _usage_from_langchain_message(message)
+            last_usage = usage
+            _log_translation_api_tokens("Translation API tokens", usage)
+            response_text = _message_content_to_text(message)
 
-    except json.JSONDecodeError:
-        print("Warning: Failed to decode JSON from the model's response.")
-        return None, usage
-    except Exception as e:
-        print(f"An unexpected error occurred during chunk translation: {e}")
-        return None, usage
+            response_json = json.loads(response_text)
+            translated_segments = response_json["translations"]
 
+            if len(translated_segments) != len(chunk_segments):
+                print(
+                    "Warning: Mismatch in segment count for a chunk. "
+                    f"Expected {len(chunk_segments)}, got "
+                    f"{len(translated_segments)}."
+                )
+                if attempt + 1 < len(models):
+                    continue
+                return None, usage
 
+            return translated_segments, usage
+
+        except json.JSONDecodeError:
+            print("Warning: Failed to decode JSON from the model's response.")
+            if attempt + 1 < len(models):
+                continue
+            return None, last_usage
+        except Exception as e:
+            print(f"An unexpected error occurred during chunk translation: {e}")
+            if attempt + 1 < len(models):
+                continue
+            return None, last_usage
 
 
 def translate_segments(

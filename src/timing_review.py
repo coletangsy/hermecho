@@ -16,14 +16,18 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import requests
 
+from openrouter_fallback import openrouter_models_with_fallback
 from transcription import (
     OPENROUTER_CHAT_URL,
     get_openrouter_http_referer,
     _audio_duration_seconds,
+    _extract_openrouter_choice_message,
     _ffmpeg_extract_chunk,
     _infer_openrouter_audio_format,
+    _json_object_response_format_for_model,
     _log_openrouter_token_usage,
     _merge_openrouter_usage,
+    _openrouter_message_content_to_text,
     _parse_json_object_from_model_text,
 )
 
@@ -292,7 +296,10 @@ def review_timing_chunk(
     usage_log_label: str,
 ) -> Tuple[Optional[List[Dict[str, Any]]], Optional[Dict[str, Any]]]:
     """
-    Call OpenRouter once for one audio chunk and a list of timing cues.
+    Call OpenRouter for one audio chunk and a list of timing cues.
+
+    Tries ``review_model`` first, then the configured OpenAI GPT fallback when
+    the primary is a Gemini 3.1 Pro/Flash family slug.
 
     Args:
         chunk_audio_path: Path to the extracted chunk (e.g. MP3).
@@ -330,26 +337,6 @@ def review_timing_chunk(
     )
     user_text = f"{prompt_intro}\n\nInput cues (clip-relative times):\n{cues_json}"
 
-    payload: Dict[str, Any] = {
-        "model": review_model,
-        "messages": [
-            {
-                "role": "user",
-                "content": [
-                    {"type": "text", "text": user_text},
-                    {
-                        "type": "input_audio",
-                        "input_audio": {
-                            "data": b64,
-                            "format": audio_format,
-                        },
-                    },
-                ],
-            }
-        ],
-        "response_format": {"type": "json_object"},
-        "temperature": 0,
-    }
     headers = {
         "Authorization": f"Bearer {api_key}",
         "Content-Type": "application/json",
@@ -357,48 +344,104 @@ def review_timing_chunk(
         "X-Title": "Hermecho Timing Review",
     }
 
-    try:
-        resp = requests.post(
-            OPENROUTER_CHAT_URL,
-            headers=headers,
-            json=payload,
-            timeout=600,
-        )
-    except requests.RequestException as exc:
-        print(f"Error: OpenRouter request failed: {exc}")
-        return None, None
+    models = openrouter_models_with_fallback(review_model)
+    last_usage: Optional[Dict[str, Any]] = None
 
-    if resp.status_code != 200:
-        print(
-            "Error: OpenRouter returned "
-            f"{resp.status_code}: {resp.text[:500]}"
-        )
-        return None, None
+    for attempt, model_id in enumerate(models):
+        if attempt > 0:
+            print(
+                f"Timing review: primary model failed for this chunk; "
+                f"retrying with fallback ({model_id})..."
+            )
 
-    try:
-        body = resp.json()
-    except json.JSONDecodeError as exc:
-        print(f"Error: invalid JSON from OpenRouter: {exc}")
-        return None, None
+        payload: Dict[str, Any] = {
+            "model": model_id,
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": user_text},
+                        {
+                            "type": "input_audio",
+                            "input_audio": {
+                                "data": b64,
+                                "format": audio_format,
+                            },
+                        },
+                    ],
+                }
+            ],
+            "temperature": 0,
+        }
+        fmt = _json_object_response_format_for_model(model_id)
+        if fmt is not None:
+            payload["response_format"] = fmt
 
-    usage: Optional[Dict[str, Any]] = None
-    if isinstance(body, dict):
-        raw_usage = body.get("usage")
-        if isinstance(raw_usage, dict):
-            usage = raw_usage
+        try:
+            resp = requests.post(
+                OPENROUTER_CHAT_URL,
+                headers=headers,
+                json=payload,
+                timeout=600,
+            )
+        except requests.RequestException as exc:
+            print(f"Error: OpenRouter request failed: {exc}")
+            if attempt + 1 < len(models):
+                continue
+            return None, last_usage
 
-    try:
-        content = body["choices"][0]["message"]["content"]
-    except (KeyError, IndexError, TypeError) as exc:
-        print(f"Error: unexpected OpenRouter response shape: {exc}")
+        if resp.status_code != 200:
+            print(
+                "Error: OpenRouter returned "
+                f"{resp.status_code}: {resp.text[:500]}"
+            )
+            if attempt + 1 < len(models):
+                continue
+            return None, last_usage
+
+        try:
+            body = resp.json()
+        except json.JSONDecodeError as exc:
+            print(f"Error: invalid JSON from OpenRouter: {exc}")
+            if attempt + 1 < len(models):
+                continue
+            return None, last_usage
+
+        usage: Optional[Dict[str, Any]] = None
+        if isinstance(body, dict):
+            raw_usage = body.get("usage")
+            if isinstance(raw_usage, dict):
+                usage = raw_usage
+                last_usage = usage
+
+        message, shape_err = _extract_openrouter_choice_message(body)
+        if shape_err is not None or message is None:
+            print(f"Error: {shape_err}")
+            _log_openrouter_token_usage(usage_log_label, usage)
+            if attempt + 1 < len(models):
+                continue
+            return None, usage
+
         _log_openrouter_token_usage(usage_log_label, usage)
+
+        text = _openrouter_message_content_to_text(message.get("content"))
+        if text is None:
+            print(
+                "Error: OpenRouter returned no assistant text in "
+                "choices[0].message for timing review."
+            )
+            if attempt + 1 < len(models):
+                continue
+            return None, usage
+
+        parsed = parse_review_response(text, len(payload_cues))
+        if parsed is not None:
+            return parsed, usage
+        if attempt + 1 < len(models):
+            continue
         return None, usage
 
-    _log_openrouter_token_usage(usage_log_label, usage)
-    parsed = parse_review_response(str(content), len(payload_cues))
-    if parsed is None:
-        return None, usage
-    return parsed, usage
+    return None, last_usage
 
 
 def _apply_chunk_times(
