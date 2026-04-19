@@ -7,7 +7,11 @@ from datetime import datetime
 from dotenv import load_dotenv
 
 from video_processing import extract_audio, burn_subtitles_into_video, is_ffmpeg_installed
-from transcription import transcribe_audio
+from transcription import (
+    DEFAULT_MULTIMODAL_MODEL,
+    transcribe_audio,
+    transcribe_audio_multimodal,
+)
 from translation import translate_segments
 from subtitles import fill_transcription_gaps, adjust_subtitle_timing, generate_srt, split_long_segments
 from utils import load_reference_material, _print_segments, extract_keywords_for_whisper
@@ -23,27 +27,107 @@ def _parse_arguments() -> argparse.Namespace:
         An argparse.Namespace object containing the parsed arguments.
     """
     parser = argparse.ArgumentParser(
-        description="Translate a Korean video with subtitles.")
+        description=(
+            "Transcribe a video (default: OpenRouter multimodal; optional local "
+            "Whisper with --whisper), optionally translate, then burn subtitles. "
+            "Omit --transcribe-only for the full translate + burn pipeline."
+        ),
+    )
     parser.add_argument(
         "video_filename", help="The filename of the video in the input directory.")
+    parser.add_argument(
+        "--whisper",
+        action="store_true",
+        help=(
+            "Use local Whisper for transcription instead of the default "
+            "OpenRouter multimodal path. Same downstream pipeline unless "
+            "--transcribe-only."
+        ),
+    )
+    parser.add_argument(
+        "--multimodal-model",
+        default=DEFAULT_MULTIMODAL_MODEL,
+        help=(
+            "OpenRouter model id for multimodal transcription "
+            f"(default: {DEFAULT_MULTIMODAL_MODEL})."
+        ),
+    )
+    parser.add_argument(
+        "--chunk-seconds",
+        type=float,
+        default=300.0,
+        help=(
+            "Multimodal only: max seconds per API request; longer audio is "
+            "split with ffmpeg. Try 180 if requests fail."
+        ),
+    )
+    parser.add_argument(
+        "--transcribe-only",
+        action="store_true",
+        help=(
+            "Stop after source-language subtitles: write SRT only, skip "
+            "translation and burn-in."
+        ),
+    )
+    parser.add_argument(
+        "--save-source-transcript",
+        action="store_true",
+        help=(
+            "With the full pipeline, also write a source-language SRT "
+            "(post guardrails) before translation."
+        ),
+    )
     parser.add_argument("--model", default="large",
                         help="The Whisper model for transcription (e.g., 'tiny', 'base', 'small', 'medium', 'large').")
     parser.add_argument("--language", default="ko",
                         help="The language of the audio for transcription.")
     parser.add_argument("--target_language", default="Traditional Chinese (Taiwan)",
                         help="The target language for translation.")
-    parser.add_argument("--translation_model",
-                        default="google/gemini-3.1-pro-preview", help="The model for translation.")
+    parser.add_argument(
+        "--translation_model",
+        default="google/gemini-3.1-flash-lite-preview",
+        help="OpenRouter model id for translation (default: Gemini 3.1 Flash).",
+    )
     parser.add_argument("--time_buffer", type=float, default=0.1,
                         help="Buffer time between subtitles in seconds.")
+    parser.add_argument(
+        "--timing-review",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help=(
+            "After translation, run a multimodal pass on chunked audio to "
+            "refine subtitle start/end (Korean audio, translated text). "
+            "On by default (extra OpenRouter cost); use --no-timing-review "
+            "to skip."
+        ),
+    )
+    parser.add_argument(
+        "--timing-review-model",
+        default="google/gemini-3.1-flash-lite-preview",
+        help="OpenRouter model id for timing review (multimodal).",
+    )
+    parser.add_argument(
+        "--timing-review-chunk-seconds",
+        type=float,
+        default=120.0,
+        help=(
+            "Max seconds of audio per timing-review request (default 120)."
+        ),
+    )
     parser.add_argument("--input_dir", default="input",
                         help="The directory where the input video is located.")
     parser.add_argument("--output_dir", default="output",
                         help="The directory where the output files will be saved.")
     parser.add_argument("--reference_file",  default="references/tripleS.md",
                         help="Optional path to a reference file for translation context.")
-    parser.add_argument("--initial_prompt", default="This is a conversation in Korean and English.",
-                        help="Initial prompt to guide Whisper (e.g., 'This is a Korean video with some English').")
+    parser.add_argument(
+        "--initial_prompt",
+        default="This is a conversation in Korean and English.",
+        help=(
+            "Base prompt for transcription (multimodal or Whisper), e.g. "
+            "'This is a Korean video with some English'."
+        ),
+    )
     parser.add_argument("--temperature", type=float, default=0.0,
                         help="Whisper sampling temperature (0.0 is deterministic, higher is more creative).")
     parser.add_argument("--font_name", default="PingFang TC",
@@ -80,60 +164,147 @@ def _process_video(args: argparse.Namespace):
         return
 
     try:
-        # Generate context-aware prompt for Whisper
+        # Context for transcription (Whisper or multimodal prompt text).
         keywords = extract_keywords_for_whisper(args.reference_file)
         full_prompt = args.initial_prompt
         if keywords:
             full_prompt = f"{full_prompt} Context: {keywords}"
-            print(f"Generated Whisper Prompt: {full_prompt}")
 
-        transcribed_segments = transcribe_audio(
-            audio_path, 
-            model=args.model, 
-            language=args.language,
-            initial_prompt=full_prompt,
-            temperature=args.temperature
-        )
+        if args.whisper:
+            transcribed_segments = transcribe_audio(
+                audio_path,
+                model=args.model,
+                language=args.language,
+                initial_prompt=full_prompt,
+                temperature=args.temperature,
+            )
+        else:
+            print(
+                f"Using multimodal transcription model: "
+                f"{args.multimodal_model}"
+            )
+            transcribed_segments = transcribe_audio_multimodal(
+                audio_path,
+                language=args.language,
+                multimodal_model=args.multimodal_model,
+                initial_prompt=full_prompt,
+                chunk_seconds=args.chunk_seconds,
+            )
         if not transcribed_segments:
             return
 
-        _print_segments(f"Original Transcription ({args.language})", transcribed_segments)
+        _print_segments(
+            f"Original Transcription ({args.language})",
+            transcribed_segments,
+        )
 
         # Guardrail 0: Split long segments
         transcribed_segments = split_long_segments(transcribed_segments)
-        _print_segments("Transcription after Splitting", transcribed_segments)
+        _print_segments(
+            "Transcription after Splitting",
+            transcribed_segments,
+        )
 
         # Guardrail 1: Fill any significant gaps in the transcription
-        transcribed_segments = fill_transcription_gaps(transcribed_segments)
-        _print_segments("Transcription after Gap-Filling", transcribed_segments)
+        transcribed_segments = fill_transcription_gaps(
+            transcribed_segments,
+        )
+        _print_segments(
+            "Transcription after Gap-Filling",
+            transcribed_segments,
+        )
+
+        if args.transcribe_only:
+            video_name = os.path.splitext(args.video_filename)[0]
+            output_dir = os.path.join(args.output_dir, video_name)
+            os.makedirs(output_dir, exist_ok=True)
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            srt_path = os.path.join(
+                output_dir,
+                f"{video_name}_{timestamp}_transcript.srt",
+            )
+            generate_srt(transcribed_segments, srt_path)
+            print(
+                "Transcribe-only mode: done (no translation or burn-in)."
+            )
+            return
 
         # Load reference material if a path is provided
         reference_material = load_reference_material(args.reference_file)
+
+        video_name = os.path.splitext(args.video_filename)[0]
+        output_dir = os.path.join(args.output_dir, video_name)
+        os.makedirs(output_dir, exist_ok=True)
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+
+        if args.save_source_transcript:
+            source_srt = os.path.join(
+                output_dir,
+                f"{video_name}_{timestamp}_transcript_source.srt",
+            )
+            generate_srt(
+                transcribed_segments,
+                source_srt,
+            )
 
         translated_segments = translate_segments(
             transcribed_segments,
             target_language=args.target_language,
             translation_model=args.translation_model,
-            reference_material=reference_material
+            reference_material=reference_material,
         )
 
         if translated_segments:
-            _print_segments(
-                f"Translation ({args.target_language})", translated_segments)
+            translation_label = f"Translation ({args.target_language})"
+            timing_review_applied = False
+            if args.timing_review:
+                from timing_review import review_subtitle_timing
 
-            adjusted_segments = adjust_subtitle_timing(
-                translated_segments, args.time_buffer)
-            _print_segments(f"Adjusted Subtitles", adjusted_segments)
+                print(
+                    "Running timing review "
+                    f"(model={args.timing_review_model}, "
+                    f"chunk={args.timing_review_chunk_seconds}s)..."
+                )
+                reviewed = review_subtitle_timing(
+                    audio_path,
+                    translated_segments,
+                    chunk_seconds=args.timing_review_chunk_seconds,
+                    review_model=args.timing_review_model,
+                    source_language=args.language,
+                    target_language=args.target_language,
+                )
+                if reviewed is not None:
+                    translated_segments = reviewed
+                    timing_review_applied = True
+                    translation_label += " (after timing review)"
+                else:
+                    print(
+                        "Warning: timing review failed; using translation "
+                        "timings unchanged."
+                    )
 
-            video_name = os.path.splitext(args.video_filename)[0]
-            output_dir = os.path.join(args.output_dir, video_name)
-            os.makedirs(output_dir, exist_ok=True)
+            _print_segments(translation_label, translated_segments)
 
-            # Generate timestamp for versioning
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            if not args.whisper:
+                # Keep multimodal segment end times (no gap-fill stretch).
+                final_subtitle_segments = translated_segments
+            else:
+                # Whisper (and timing review): extend each cue's end toward the
+                # next start minus buffer so viewers do not see long empty gaps.
+                final_subtitle_segments = adjust_subtitle_timing(
+                    translated_segments,
+                    args.time_buffer,
+                )
+                label = (
+                    "Adjusted Subtitles (after timing review)"
+                    if timing_review_applied
+                    else "Adjusted Subtitles"
+                )
+                _print_segments(label, final_subtitle_segments)
 
-            srt_path = os.path.join(output_dir, f"{video_name}_{timestamp}_subtitles.srt")
-            generate_srt(adjusted_segments, srt_path)
+            srt_path = os.path.join(
+                output_dir, f"{video_name}_{timestamp}_subtitles.srt")
+            generate_srt(final_subtitle_segments, srt_path)
 
             # Burn subtitles into a new video file
             output_video_path = os.path.join(
@@ -145,7 +316,7 @@ def _process_video(args: argparse.Namespace):
                 font_name=args.font_name,
                 font_size=args.font_size,
                 outline_width=args.outline_width,
-                use_box_background=args.box_background
+                use_box_background=args.box_background,
             )
 
     finally:
