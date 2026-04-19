@@ -1,11 +1,13 @@
 """
 Unit tests for multimodal subtitle timing review helpers.
 """
+import json
 import os
 import tempfile
 import unittest
 from unittest.mock import MagicMock, patch
 
+from models import TimingReviewResponse, TimingReviewSegment
 from timing_review import (
     _clamp_and_repair_subtitles_in_order,
     build_review_payload_cues,
@@ -54,13 +56,13 @@ class TestBuildReviewPayloadCues(unittest.TestCase):
         cues = build_review_payload_cues(indexed, window_start=10.0, window_span=5.0)
         self.assertEqual(len(cues), 2)
         self.assertEqual(cues[0]["id"], 0)
-        self.assertEqual(cues[0]["start"], 0.0)
-        self.assertEqual(cues[0]["end"], 2.0)
+        self.assertEqual(cues[0]["start"], "00:00:00,000")
+        self.assertEqual(cues[0]["end"], "00:00:02,000")
         self.assertEqual(cues[0]["text"], "안녕")
         self.assertEqual(cues[0]["translation"], "你好")
         self.assertEqual(cues[1]["id"], 1)
-        self.assertAlmostEqual(cues[1]["start"], 2.0)
-        self.assertAlmostEqual(cues[1]["end"], 5.0)
+        self.assertEqual(cues[1]["start"], "00:00:02,000")
+        self.assertEqual(cues[1]["end"], "00:00:05,000")
 
 
 class TestClampAndRepairInOrder(unittest.TestCase):
@@ -89,47 +91,51 @@ class TestClampAndRepairInOrder(unittest.TestCase):
 
 
 class TestParseReviewResponse(unittest.TestCase):
-    """JSON timing rows from the model."""
+    """Timing row conversion from TimingReviewResponse pydantic objects."""
 
     def test_valid(self) -> None:
-        raw = (
-            '{"segments":['
-            '{"id":1,"start":2.0,"end":3.0},'
-            '{"id":0,"start":0.0,"end":1.0}'
-            "]}"
+        reviewed = TimingReviewResponse(
+            segments=[
+                TimingReviewSegment(id=1, start="00:00:02,000", end="00:00:03,000"),
+                TimingReviewSegment(id=0, start="00:00:00,000", end="00:00:01,000"),
+            ]
         )
-        rows = parse_review_response(raw, expected_count=2)
+        rows = parse_review_response(reviewed, expected_count=2)
         self.assertIsNotNone(rows)
         assert rows is not None
         self.assertEqual(rows[0]["id"], 0)
+        self.assertAlmostEqual(rows[0]["start"], 0.0)
+        self.assertAlmostEqual(rows[0]["end"], 1.0)
         self.assertEqual(rows[1]["id"], 1)
+        self.assertAlmostEqual(rows[1]["start"], 2.0)
 
     def test_wrong_count_returns_none(self) -> None:
-        raw = '{"segments":[{"id":0,"start":0.0,"end":1.0}]}'
-        self.assertIsNone(parse_review_response(raw, expected_count=2))
+        reviewed = TimingReviewResponse(
+            segments=[TimingReviewSegment(id=0, start="00:00:00,000", end="00:00:01,000")]
+        )
+        self.assertIsNone(parse_review_response(reviewed, expected_count=2))
 
 
 class TestReviewTimingChunk(unittest.TestCase):
-    """OpenRouter request shape for one chunk."""
 
-    @patch("timing_review.requests.post")
-    @patch.dict(os.environ, {"OPENROUTER_API_KEY": "test-key"}, clear=False)
-    def test_posts_temperature_zero_and_input_audio(self, mock_post: MagicMock) -> None:
+    @patch.dict(os.environ, {"GEMINI_API_KEY": "test-key"}, clear=False)
+    @patch("timing_review._make_gemini_client")
+    def test_calls_gemini_and_parses_result(self, mock_make_client: MagicMock) -> None:
+        parsed_response = TimingReviewResponse(
+            segments=[TimingReviewSegment(id=0, start="00:00:00,000", end="00:00:01,000")]
+        )
         mock_resp = MagicMock()
-        mock_resp.status_code = 200
-        mock_resp.json.return_value = {
-            "choices": [
-                {
-                    "message": {
-                        "content": (
-                            '{"segments":[{"id":0,"start":0.0,"end":1.0}]}'
-                        )
-                    }
-                }
-            ],
-            "usage": {"prompt_tokens": 1, "completion_tokens": 1},
-        }
-        mock_post.return_value = mock_resp
+        mock_resp.parsed = parsed_response
+        mock_resp.usage_metadata = None
+
+        mock_uploaded = MagicMock()
+        mock_uploaded.uri = "https://example.com/files/x"
+        mock_uploaded.name = "files/x"
+
+        mock_client = MagicMock()
+        mock_client.models.generate_content.return_value = mock_resp
+        mock_client.files.upload.return_value = mock_uploaded
+        mock_make_client.return_value = mock_client
 
         with tempfile.NamedTemporaryFile(suffix=".mp3", delete=False) as tmp:
             path = tmp.name
@@ -138,16 +144,8 @@ class TestReviewTimingChunk(unittest.TestCase):
         try:
             out, _usage = review_timing_chunk(
                 path,
-                [
-                    {
-                        "id": 0,
-                        "start": 0.0,
-                        "end": 1.0,
-                        "text": "a",
-                        "translation": "A",
-                    }
-                ],
-                "m",
+                [{"id": 0, "start": "00:00:00,000", "end": "00:00:01,000", "text": "a", "translation": "A"}],
+                "gemini-3.1-flash-lite-preview",
                 "ko",
                 "zh",
                 10.0,
@@ -157,69 +155,53 @@ class TestReviewTimingChunk(unittest.TestCase):
             os.unlink(path)
 
         self.assertIsNotNone(out)
-        mock_post.assert_called_once()
-        kwargs = mock_post.call_args.kwargs
-        body = kwargs["json"]
-        self.assertEqual(body["temperature"], 0)
-        self.assertEqual(body["response_format"], {"type": "json_object"})
-        content = body["messages"][0]["content"]
-        self.assertTrue(any(b.get("type") == "input_audio" for b in content))
+        assert out is not None
+        self.assertEqual(out[0]["id"], 0)
+        self.assertAlmostEqual(out[0]["start"], 0.0)
+        mock_client.models.generate_content.assert_called_once()
 
-    @patch("timing_review.requests.post")
-    @patch.dict(os.environ, {"OPENROUTER_API_KEY": "test-key"}, clear=False)
-    def test_gemini_flash_retries_gpt_mini_on_http_500(
-        self,
-        mock_post: MagicMock,
-    ) -> None:
-        """Gemini 3.1 Flash primary triggers gpt-5.4-mini on HTTP error."""
-        bad = MagicMock()
-        bad.status_code = 500
-        bad.text = "err"
-        good = MagicMock()
-        good.status_code = 200
-        good.json.return_value = {
-            "choices": [
-                {
-                    "message": {
-                        "content": (
-                            '{"segments":[{"id":0,"start":0.0,"end":1.0}]}'
-                        )
-                    }
-                }
-            ],
-            "usage": {"prompt_tokens": 1, "completion_tokens": 1},
-        }
-        mock_post.side_effect = [bad, good]
+    @patch.dict(os.environ, {"GEMINI_API_KEY": "test-key"}, clear=False)
+    @patch("timing_review._make_gemini_client")
+    def test_retries_on_exception(self, mock_make_client: MagicMock) -> None:
+        good_parsed = TimingReviewResponse(
+            segments=[TimingReviewSegment(id=0, start="00:00:00,100", end="00:00:00,900")]
+        )
+        good_resp = MagicMock()
+        good_resp.parsed = good_parsed
+        good_resp.usage_metadata = None
+
+        mock_uploaded = MagicMock()
+        mock_uploaded.uri = "https://example.com/files/y"
+        mock_uploaded.name = "files/y"
+
+        mock_client = MagicMock()
+        mock_client.files.upload.return_value = mock_uploaded
+        mock_client.models.generate_content.side_effect = [
+            Exception("transient"),
+            good_resp,
+        ]
+        mock_make_client.return_value = mock_client
 
         with tempfile.NamedTemporaryFile(suffix=".mp3", delete=False) as tmp:
             path = tmp.name
             tmp.write(b"\x00\x01")
 
         try:
-            out, _usage = review_timing_chunk(
-                path,
-                [
-                    {
-                        "id": 0,
-                        "start": 0.0,
-                        "end": 1.0,
-                        "text": "a",
-                        "translation": "A",
-                    }
-                ],
-                "google/gemini-3.1-flash-lite-preview",
-                "ko",
-                "zh",
-                10.0,
-                "test-label",
-            )
+            with patch("timing_review.time.sleep"):
+                out, _usage = review_timing_chunk(
+                    path,
+                    [{"id": 0, "start": "00:00:00,000", "end": "00:00:01,000", "text": "a", "translation": "A"}],
+                    "gemini-3.1-flash-lite-preview",
+                    "ko",
+                    "zh",
+                    10.0,
+                    "test-label",
+                )
         finally:
             os.unlink(path)
 
         self.assertIsNotNone(out)
-        self.assertEqual(mock_post.call_count, 2)
-        second = mock_post.call_args_list[1][1]["json"]
-        self.assertEqual(second["model"], "openai/gpt-5.4-mini")
+        self.assertEqual(mock_client.models.generate_content.call_count, 2)
 
 
 class TestReviewSubtitleTimingOrchestrator(unittest.TestCase):

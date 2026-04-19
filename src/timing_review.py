@@ -1,5 +1,5 @@
 """
-Multimodal subtitle timing review via OpenRouter (audio + JSON cues).
+Subtitle timing review via Google Generative AI (audio + JSON cues).
 
 Uses Korean source text plus translated text for context; only ``start`` and
 ``end`` are updated from the model. Translation strings are re-applied from
@@ -7,38 +7,83 @@ the input segments so the model cannot change subtitle wording.
 """
 from __future__ import annotations
 
-import base64
 import json
 import os
 import shutil
 import tempfile
+import time
 from typing import Any, Dict, List, Optional, Tuple
 
-import requests
+from google import genai
+from google.genai import types
 
-from openrouter_fallback import openrouter_models_with_fallback
+from models import TimingReviewResponse, seconds_to_srt, srt_to_seconds
+from retry import compute_backoff
 from transcription import (
-    OPENROUTER_CHAT_URL,
-    get_openrouter_http_referer,
     _audio_duration_seconds,
-    _extract_openrouter_choice_message,
     _ffmpeg_extract_chunk,
-    _infer_openrouter_audio_format,
-    _json_object_response_format_for_model,
-    _log_openrouter_token_usage,
-    _merge_openrouter_usage,
-    _openrouter_message_content_to_text,
-    _parse_json_object_from_model_text,
+    _infer_gemini_inline_audio_mime_type,
 )
 
-# Default max seconds per review request (smaller than full transcribe chunks).
 DEFAULT_TIMING_REVIEW_CHUNK_SECONDS = 120.0
 
-# Monotonic repair after review: same spirit as multimodal repair, but we keep
-# list order so cue text never swaps with a neighbor (translation order is
-# authoritative). Input segments are expected to be roughly time-ordered.
 _MIN_REVIEW_SEG_SEC = 0.05
 _MIN_REVIEW_GAP_SEC = 0.015
+_MAX_REVIEW_ATTEMPTS = 3
+
+
+def _make_gemini_client() -> genai.Client:
+    api_key = os.getenv("GEMINI_API_KEY")
+    if not api_key:
+        raise ValueError("GEMINI_API_KEY is not set.")
+    return genai.Client(api_key=api_key)
+
+
+def _log_review_usage(label: str, response: Any) -> None:
+    um = getattr(response, "usage_metadata", None)
+    if um is None:
+        print(f"{label}: (no usage metadata)")
+        return
+    parts = []
+    pt = getattr(um, "prompt_token_count", None)
+    ct = getattr(um, "candidates_token_count", None)
+    tt = getattr(um, "total_token_count", None)
+    if pt is not None:
+        parts.append(f"promptTokenCount={pt}")
+    if ct is not None:
+        parts.append(f"candidatesTokenCount={ct}")
+    if tt is not None:
+        parts.append(f"totalTokenCount={tt}")
+    if parts:
+        print(f"{label}: " + ", ".join(parts))
+    else:
+        print(f"{label}: (empty usage metadata)")
+
+
+def _usage_dict_from_response(response: Any) -> Optional[Dict[str, Any]]:
+    um = getattr(response, "usage_metadata", None)
+    if um is None:
+        return None
+    out: Dict[str, Any] = {}
+    pt = getattr(um, "prompt_token_count", None)
+    ct = getattr(um, "candidates_token_count", None)
+    tt = getattr(um, "total_token_count", None)
+    if pt is not None:
+        out["prompt_tokens"] = int(pt)
+    if ct is not None:
+        out["completion_tokens"] = int(ct)
+    if tt is not None:
+        out["total_tokens"] = int(tt)
+    return out if out else None
+
+
+def _merge_usage(totals: Dict[str, int], usage: Optional[Dict[str, Any]]) -> None:
+    if not usage:
+        return
+    for key in ("prompt_tokens", "completion_tokens", "total_tokens"):
+        val = usage.get(key)
+        if val is not None:
+            totals[key] = totals.get(key, 0) + int(val)
 
 
 def _clamp_and_repair_subtitles_in_order(
@@ -51,13 +96,6 @@ def _clamp_and_repair_subtitles_in_order(
     Unlike ``_repair_multimodal_segment_times``, this does **not** sort by
     start time, so each dict keeps its pairing of ``text`` / ``source_text``
     with adjusted times.
-
-    Args:
-        segments: Segment dicts with numeric ``start`` / ``end``.
-        clip_end: Audio duration upper bound in seconds.
-
-    Returns:
-        New list with repaired ``start`` / ``end`` only.
     """
     if clip_end <= 0 or not segments:
         return [dict(s) for s in segments]
@@ -108,20 +146,7 @@ def slice_segments_for_window(
     window_start: float,
     window_end: float,
 ) -> List[Tuple[int, Dict[str, Any]]]:
-    """
-    Return (global_index, segment) pairs for cues overlapping the window.
-
-    Overlap uses half-open [window_start, window_end) against segment
-    [start, end] with standard interval overlap.
-
-    Args:
-        segments: Full timeline segment dicts with numeric start/end.
-        window_start: Inclusive window start in seconds.
-        window_end: Exclusive window end in seconds.
-
-    Returns:
-        List of index and segment dict in timeline order.
-    """
+    """Return (global_index, segment) pairs for cues overlapping the window."""
     out: List[Tuple[int, Dict[str, Any]]] = []
     for i, seg in enumerate(segments):
         try:
@@ -140,19 +165,7 @@ def build_review_payload_cues(
     window_start: float,
     window_span: float,
 ) -> List[Dict[str, Any]]:
-    """
-    Build JSON-serializable cues with clip-relative start/end.
-
-    Args:
-        indexed_segments: Pairs of global index and segment dict. Indices
-            are not sent; local ``id`` is 0..n-1 in list order.
-        window_start: Absolute seconds where the extracted audio chunk starts.
-        window_span: Length of the chunk in seconds (clip is [0, span)).
-
-    Returns:
-        List of dicts: id, start, end (relative), text (source language),
-        translation (subtitle language).
-    """
+    """Build JSON-serializable cues with clip-relative SRT timestamps."""
     cues: List[Dict[str, Any]] = []
     span = max(window_span, 1e-6)
     for local_id, (_gidx, seg) in enumerate(indexed_segments):
@@ -168,8 +181,8 @@ def build_review_payload_cues(
         cues.append(
             {
                 "id": local_id,
-                "start": round(rel_s, 3),
-                "end": round(rel_e, 3),
+                "start": seconds_to_srt(rel_s),
+                "end": seconds_to_srt(rel_e),
                 "text": source,
                 "translation": translation,
             }
@@ -178,41 +191,21 @@ def build_review_payload_cues(
 
 
 def parse_review_response(
-    raw: str,
+    reviewed: TimingReviewResponse,
     expected_count: int,
 ) -> Optional[List[Dict[str, Any]]]:
-    """
-    Parse model JSON into a list of timing rows for one chunk.
-
-    Expects ``{"segments":[{"id":int,"start":float,"end":float}, ...]}``.
-    Translation fields in the response are ignored.
-
-    Args:
-        raw: Model message content string.
-        expected_count: Number of cues in the request (local ids 0..n-1).
-
-    Returns:
-        Sorted list of dicts with id, start, end, or None if invalid.
-    """
+    """Convert a validated TimingReviewResponse into timing rows (seconds)."""
     if expected_count <= 0:
         return []
-    parsed_obj = _parse_json_object_from_model_text(raw)
-    if not parsed_obj:
-        return None
-    raw_list = parsed_obj.get("segments")
-    if not isinstance(raw_list, list):
-        return None
     rows: List[Dict[str, Any]] = []
-    for item in raw_list:
-        if not isinstance(item, dict):
-            continue
+    for item in reviewed.segments:
         try:
-            sid = int(item["id"])
-            start = float(item["start"])
-            end = float(item["end"])
-        except (KeyError, TypeError, ValueError):
+            start = srt_to_seconds(item.start)
+            end = srt_to_seconds(item.end)
+        except ValueError as exc:
+            print(f"  Warning: skipping review segment with bad timestamp: {exc}")
             continue
-        rows.append({"id": sid, "start": start, "end": end})
+        rows.append({"id": item.id, "start": start, "end": end})
     rows.sort(key=lambda r: r["id"])
     if len(rows) != expected_count:
         print(
@@ -232,12 +225,6 @@ def _build_timing_review_prompt(
     target_language: str,
     chunk_duration_sec: float,
 ) -> str:
-    """
-    Build user instructions for clip-relative timing correction.
-
-    Audio is in the source language; subtitles may differ. Timing must follow
-    speech in the audio, not reading speed of the translation.
-    """
     return "\n".join(
         [
             "You are a professional subtitle timing editor.",
@@ -252,8 +239,9 @@ def _build_timing_review_prompt(
             "source-language speech is audible in the clip.",
             "",
             "Rules:",
-            "- Times in your output MUST be in seconds, relative to the start "
-            "of THIS clip (0 = clip start, end <= clip length).",
+            "- Timestamps in your output MUST be SRT format strings "
+            "(HH:MM:SS,mmm), relative to the start of THIS clip "
+            "(00:00:00,000 = clip start). Example: \"00:00:02,500\" = 2.5s in.",
             "- Do NOT change ``translation`` or ``text``; they are not part of "
             "your output schema.",
             "- Do NOT add or remove cues; output exactly one row per input id.",
@@ -273,15 +261,16 @@ def _build_timing_review_prompt(
             "- Do NOT time cues from how long it takes to read the "
             "translation; boundaries come from Korean/source speech only.",
             "",
-            "Negative example: if speech is clearly audible at 0.2s but "
-            "start is 1.2s, move start toward 0.2s unless it would overlap "
-            "the previous cue.",
+            "Negative example: if speech is clearly audible at 00:00:00,200 "
+            "but start is 00:00:01,200, move start toward 00:00:00,200 unless "
+            "it would overlap the previous cue.",
             "",
-            f"This clip is about {chunk_duration_sec:.2f} seconds long.",
+            f"This clip is about {chunk_duration_sec:.2f} seconds long "
+            f"(= {seconds_to_srt(chunk_duration_sec)}).",
             "",
             "Return ONLY valid JSON (no markdown) with this exact shape:",
-            '{"segments":[{"id":0,"start":0.0,"end":1.2}, ...]}',
-            "Each segment: id (integer, 0..n-1), start, end (numbers).",
+            '{"segments":[{"id":0,"start":"00:00:00,000","end":"00:00:01,200"}, ...]}',
+            "Each segment: id (integer, 0..n-1), start and end as SRT strings.",
         ]
     )
 
@@ -296,15 +285,12 @@ def review_timing_chunk(
     usage_log_label: str,
 ) -> Tuple[Optional[List[Dict[str, Any]]], Optional[Dict[str, Any]]]:
     """
-    Call OpenRouter for one audio chunk and a list of timing cues.
-
-    Tries ``review_model`` first, then the configured OpenAI GPT fallback when
-    the primary is a Gemini 3.1 Pro/Flash family slug.
+    Call Gemini for one audio chunk and a list of timing cues.
 
     Args:
         chunk_audio_path: Path to the extracted chunk (e.g. MP3).
         payload_cues: Cues with clip-relative start/end and text fields.
-        review_model: OpenRouter model id.
+        review_model: Gemini model id.
         source_language: Spoken language label for the prompt.
         target_language: Subtitle language label for the prompt.
         chunk_duration_sec: Clip length for the prompt text.
@@ -313,133 +299,106 @@ def review_timing_chunk(
     Returns:
         (parsed timing rows, usage) or (None, usage) on failure.
     """
-    api_key = os.getenv("OPENROUTER_API_KEY")
-    if not api_key:
-        print("Error: OPENROUTER_API_KEY is not set.")
+    try:
+        client = _make_gemini_client()
+    except ValueError as exc:
+        print(f"Error: {exc}")
         return None, None
 
     try:
         with open(chunk_audio_path, "rb") as f:
-            b64 = base64.standard_b64encode(f.read()).decode("ascii")
+            audio_bytes = f.read()
     except OSError as exc:
         print(f"Error: could not read chunk audio: {exc}")
         return None, None
 
-    audio_format = _infer_openrouter_audio_format(chunk_audio_path)
+    mime_type = _infer_gemini_inline_audio_mime_type(chunk_audio_path)
     prompt_intro = _build_timing_review_prompt(
-        source_language,
-        target_language,
-        chunk_duration_sec,
+        source_language, target_language, chunk_duration_sec
     )
-    cues_json = json.dumps(
-        {"cues": payload_cues},
-        ensure_ascii=False,
+    cues_json = json.dumps({"cues": payload_cues}, ensure_ascii=False)
+    user_text = (
+        f"{prompt_intro}\n\nInput cues (clip-relative SRT timestamps):\n{cues_json}"
     )
-    user_text = f"{prompt_intro}\n\nInput cues (clip-relative times):\n{cues_json}"
 
-    headers = {
-        "Authorization": f"Bearer {api_key}",
-        "Content-Type": "application/json",
-        "HTTP-Referer": get_openrouter_http_referer(),
-        "X-Title": "Hermecho Timing Review",
-    }
-
-    models = openrouter_models_with_fallback(review_model)
     last_usage: Optional[Dict[str, Any]] = None
 
-    for attempt, model_id in enumerate(models):
+    for attempt in range(_MAX_REVIEW_ATTEMPTS):
         if attempt > 0:
+            delay = compute_backoff(attempt - 1)
             print(
-                f"Timing review: primary model failed for this chunk; "
-                f"retrying with fallback ({model_id})..."
+                f"Timing review: attempt {attempt + 1}/{_MAX_REVIEW_ATTEMPTS} "
+                f"retrying in {delay:.1f}s..."
             )
+            time.sleep(delay)
 
-        payload: Dict[str, Any] = {
-            "model": model_id,
-            "messages": [
-                {
-                    "role": "user",
-                    "content": [
-                        {"type": "text", "text": user_text},
-                        {
-                            "type": "input_audio",
-                            "input_audio": {
-                                "data": b64,
-                                "format": audio_format,
-                            },
-                        },
-                    ],
-                }
-            ],
-            "temperature": 0,
-        }
-        fmt = _json_object_response_format_for_model(model_id)
-        if fmt is not None:
-            payload["response_format"] = fmt
+        uploaded_file = None
+        try:
+            uploaded_file = client.files.upload(
+                file=chunk_audio_path,
+                config=types.UploadFileConfig(mime_type=mime_type),
+            )
+            contents = [
+                types.Part.from_text(text=user_text),
+                types.Part.from_uri(
+                    file_uri=uploaded_file.uri,
+                    mime_type=mime_type,
+                ),
+            ]
+        except Exception as upload_exc:
+            print(
+                f"Warning: File API upload failed ({upload_exc}); "
+                "falling back to inline audio."
+            )
+            contents = [
+                types.Part.from_text(text=user_text),
+                types.Part.from_bytes(data=audio_bytes, mime_type=mime_type),
+            ]
+            uploaded_file = None
 
         try:
-            resp = requests.post(
-                OPENROUTER_CHAT_URL,
-                headers=headers,
-                json=payload,
-                timeout=600,
+            response = client.models.generate_content(
+                model=review_model,
+                contents=contents,
+                config=types.GenerateContentConfig(
+                    temperature=0,
+                    response_mime_type="application/json",
+                    response_schema=TimingReviewResponse,
+                ),
             )
-        except requests.RequestException as exc:
-            print(f"Error: OpenRouter request failed: {exc}")
-            if attempt + 1 < len(models):
-                continue
-            return None, last_usage
+            usage = _usage_dict_from_response(response)
+            last_usage = usage
+            _log_review_usage(usage_log_label, response)
 
-        if resp.status_code != 200:
-            print(
-                "Error: OpenRouter returned "
-                f"{resp.status_code}: {resp.text[:500]}"
-            )
-            if attempt + 1 < len(models):
-                continue
-            return None, last_usage
+            reviewed: Optional[TimingReviewResponse] = response.parsed
+            if reviewed is None:
+                print(
+                    f"Warning: timing review SDK returned no parsed response "
+                    f"(attempt {attempt + 1}/{_MAX_REVIEW_ATTEMPTS})."
+                )
+                if attempt + 1 < _MAX_REVIEW_ATTEMPTS:
+                    continue
+                return None, usage
 
-        try:
-            body = resp.json()
-        except json.JSONDecodeError as exc:
-            print(f"Error: invalid JSON from OpenRouter: {exc}")
-            if attempt + 1 < len(models):
-                continue
-            return None, last_usage
+            parsed = parse_review_response(reviewed, len(payload_cues))
+            if parsed is not None:
+                return parsed, usage
 
-        usage: Optional[Dict[str, Any]] = None
-        if isinstance(body, dict):
-            raw_usage = body.get("usage")
-            if isinstance(raw_usage, dict):
-                usage = raw_usage
-                last_usage = usage
-
-        message, shape_err = _extract_openrouter_choice_message(body)
-        if shape_err is not None or message is None:
-            print(f"Error: {shape_err}")
-            _log_openrouter_token_usage(usage_log_label, usage)
-            if attempt + 1 < len(models):
+            if attempt + 1 < _MAX_REVIEW_ATTEMPTS:
                 continue
             return None, usage
 
-        _log_openrouter_token_usage(usage_log_label, usage)
-
-        text = _openrouter_message_content_to_text(message.get("content"))
-        if text is None:
-            print(
-                "Error: OpenRouter returned no assistant text in "
-                "choices[0].message for timing review."
-            )
-            if attempt + 1 < len(models):
+        except Exception as exc:
+            print(f"Error: Gemini timing review request failed: {exc}")
+            if attempt + 1 < _MAX_REVIEW_ATTEMPTS:
                 continue
-            return None, usage
-
-        parsed = parse_review_response(text, len(payload_cues))
-        if parsed is not None:
-            return parsed, usage
-        if attempt + 1 < len(models):
-            continue
-        return None, usage
+            return None, last_usage
+        finally:
+            if uploaded_file is not None:
+                try:
+                    client.files.delete(name=uploaded_file.name)
+                except Exception:
+                    pass
 
     return None, last_usage
 
@@ -473,22 +432,10 @@ def review_subtitle_timing(
     target_language: str,
 ) -> Optional[List[Dict[str, Any]]]:
     """
-    Refine subtitle start/end times using chunked multimodal review.
+    Refine subtitle start/end times using chunked multimodal review via Gemini.
 
-    On per-chunk parse or HTTP failure, that chunk's cues are left unchanged.
+    On per-chunk parse or API failure, that chunk's cues are left unchanged.
     Returns None only on hard errors (missing file, unreadable duration).
-
-    Args:
-        audio_path: Extracted audio path (same timeline as segment times).
-        segments: Translated segments with ``text``, ``start``, ``end``, and
-            ``source_text`` (Korean or source transcript).
-        chunk_seconds: Max seconds per API request.
-        review_model: OpenRouter model id.
-        source_language: Spoken language (prompt).
-        target_language: Subtitle language (prompt).
-
-    Returns:
-        New list of segments with adjusted times, or None on hard failure.
     """
     if not os.path.exists(audio_path):
         print(f"Error: audio not found for timing review: {audio_path}")
@@ -510,12 +457,7 @@ def review_subtitle_timing(
             span = min(span_limit, duration - window_start)
             window_end = window_start + span
             chunk_path = os.path.join(tmpdir, f"tr_{chunk_idx:04d}.mp3")
-            if not _ffmpeg_extract_chunk(
-                audio_path,
-                chunk_path,
-                window_start,
-                span,
-            ):
+            if not _ffmpeg_extract_chunk(audio_path, chunk_path, window_start, span):
                 print(
                     "Warning: ffmpeg chunk failed for timing review; "
                     "skipping this window."
@@ -524,22 +466,14 @@ def review_subtitle_timing(
                 chunk_idx += 1
                 continue
 
-            indexed = slice_segments_for_window(
-                working,
-                window_start,
-                window_end,
-            )
+            indexed = slice_segments_for_window(working, window_start, window_end)
             if not indexed:
                 window_start = window_end
                 chunk_idx += 1
                 continue
 
             index_map = [i for i, _s in indexed]
-            payload = build_review_payload_cues(
-                indexed,
-                window_start,
-                span,
-            )
+            payload = build_review_payload_cues(indexed, window_start, span)
             if not payload:
                 window_start = window_end
                 chunk_idx += 1
@@ -555,7 +489,7 @@ def review_subtitle_timing(
                 span,
                 label,
             )
-            _merge_openrouter_usage(usage_totals, usage)
+            _merge_usage(usage_totals, usage)
             if parsed is not None:
                 _apply_chunk_times(working, index_map, window_start, parsed)
             else:
@@ -568,10 +502,21 @@ def review_subtitle_timing(
             chunk_idx += 1
 
         repaired = _clamp_and_repair_subtitles_in_order(working, duration)
-        _log_openrouter_token_usage(
-            "Timing review API tokens — cumulative (all chunks)",
-            usage_totals if usage_totals else None,
-        )
+        pt = usage_totals.get("prompt_tokens")
+        ct = usage_totals.get("completion_tokens")
+        tt = usage_totals.get("total_tokens")
+        parts = []
+        if pt is not None:
+            parts.append(f"prompt_tokens={pt}")
+        if ct is not None:
+            parts.append(f"completion_tokens={ct}")
+        if tt is not None:
+            parts.append(f"total_tokens={tt}")
+        label = "Timing review API tokens — cumulative (all chunks)"
+        if parts:
+            print(f"{label}: " + ", ".join(parts))
+        else:
+            print(f"{label}: (no usage data)")
         print("Timing review finished.")
         return repaired
     finally:

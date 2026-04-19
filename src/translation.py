@@ -1,18 +1,16 @@
 """
-This module contains functions for translating text.
+This module contains functions for translating text using Google Generative AI.
 """
-import os
 import json
-import re
+import os
+import time
 from typing import Any, Dict, List, Optional, Tuple
 
-from langchain_core.messages import AIMessage
-from langchain_core.prompts import ChatPromptTemplate
-from langchain_openai import ChatOpenAI
+from google import genai
+from google.genai import types
 from tqdm import tqdm
 
-from openrouter_fallback import openrouter_models_with_fallback
-from transcription import get_openrouter_http_referer
+from retry import compute_backoff
 
 
 # Constants for the sliding window approach
@@ -21,12 +19,22 @@ TOKEN_THRESHOLD = 128000  # Max characters to send in a single prompt
 CHUNK_SIZE = 200          # Number of segments per chunk, increased for better performance
 OVERLAP_SIZE = 3         # Number of segments to overlap
 
+_MAX_TRANSLATION_ATTEMPTS = 3
+
+
+def _make_gemini_client() -> genai.Client:
+    """Create a Gemini client using the GEMINI_API_KEY environment variable."""
+    api_key = os.getenv("GEMINI_API_KEY")
+    if not api_key:
+        raise ValueError("GEMINI_API_KEY is not set.")
+    return genai.Client(api_key=api_key)
+
 
 def _merge_api_usage_tokens(
     totals: Dict[str, int],
     usage: Optional[Dict[str, Any]],
 ) -> None:
-    """Accumulate OpenAI/OpenRouter-style token_usage into totals."""
+    """Accumulate token usage counts into totals."""
     if not usage or not isinstance(usage, dict):
         return
     for key in ("prompt_tokens", "completion_tokens", "total_tokens"):
@@ -39,7 +47,7 @@ def _log_translation_api_tokens(
     label: str,
     usage: Optional[Dict[str, Any]],
 ) -> None:
-    """Print token usage from a chat completion (OpenRouter / OpenAI shape)."""
+    """Print token usage from a Gemini generate_content response."""
     if not usage:
         print(f"{label}: (no usage metadata)")
         return
@@ -59,48 +67,60 @@ def _log_translation_api_tokens(
         print(f"{label}: usage={usage!r}")
 
 
-def _usage_from_langchain_message(message: Any) -> Optional[Dict[str, Any]]:
+def _usage_from_genai_response(response: Any) -> Optional[Dict[str, Any]]:
     """
-    Extract token usage from an AIMessage (LangChain OpenAI-compatible).
+    Extract token usage from a google-genai GenerateContentResponse.
 
-    OpenRouter typically surfaces usage under response_metadata['token_usage'].
-    Some stacks use usage_metadata with input_tokens / output_tokens.
+    Maps usageMetadata fields to a canonical dict with prompt_tokens,
+    completion_tokens, total_tokens.
     """
-    if message is None:
+    if response is None:
         return None
-    meta = getattr(message, "response_metadata", None) or {}
-    u = meta.get("token_usage")
-    if isinstance(u, dict) and u:
-        return dict(u)
-    um = getattr(message, "usage_metadata", None)
-    if isinstance(um, dict) and um:
-        out: Dict[str, Any] = {}
-        if "input_tokens" in um:
-            out["prompt_tokens"] = um["input_tokens"]
-        if "output_tokens" in um:
-            out["completion_tokens"] = um["output_tokens"]
-        if "total_tokens" in um:
-            out["total_tokens"] = um["total_tokens"]
-        return out if out else dict(um)
+    um = getattr(response, "usage_metadata", None)
+    if um is None:
+        return None
+    out: Dict[str, Any] = {}
+    pt = getattr(um, "prompt_token_count", None)
+    ct = getattr(um, "candidates_token_count", None)
+    tt = getattr(um, "total_token_count", None)
+    if pt is not None:
+        out["prompt_tokens"] = int(pt)
+    if ct is not None:
+        out["completion_tokens"] = int(ct)
+    if tt is not None:
+        out["total_tokens"] = int(tt)
+    return out if out else None
+
+
+def _extract_translations_from_response(
+    response_json: Any,
+    expected_count: int,
+) -> Optional[List[str]]:
+    """
+    Robustly extract the translations list from a model JSON response.
+
+    Handles:
+    - ``{"translations": [...]}`` (canonical expected shape)
+    - A bare JSON array ``[...]`` (model ignored the wrapper key)
+    - Any other top-level dict key whose value is a list of the right length
+    """
+    if isinstance(response_json, list):
+        return response_json
+
+    if not isinstance(response_json, dict):
+        return None
+
+    if "translations" in response_json:
+        val = response_json["translations"]
+        if isinstance(val, list):
+            return val
+
+    for val in response_json.values():
+        if isinstance(val, list) and len(val) == expected_count:
+            if all(isinstance(item, str) for item in val):
+                return val
+
     return None
-
-
-def _message_content_to_text(message: Any) -> str:
-    """Best-effort string content from an AIMessage or similar."""
-    if isinstance(message, AIMessage):
-        raw = message.content
-        if isinstance(raw, str):
-            return raw
-        if isinstance(raw, list):
-            parts: List[str] = []
-            for block in raw:
-                if isinstance(block, str):
-                    parts.append(block)
-                elif isinstance(block, dict) and block.get("type") == "text":
-                    parts.append(str(block.get("text", "")))
-            return "".join(parts)
-        return str(raw)
-    return str(message)
 
 
 def _translate_chunk(
@@ -111,31 +131,30 @@ def _translate_chunk(
     context: Dict[str, str],
 ) -> Tuple[Optional[List[str]], Optional[Dict[str, Any]]]:
     """
-    Translates a single chunk of subtitle segments using a language model.
+    Translates a single chunk of subtitle segments using Gemini.
 
-    This function formats the text segments as a JSON array and instructs the model
-    to return a translated JSON array, which is more robust for segment counting.
+    Formats the text segments as a JSON array and instructs the model to
+    return a translated JSON array, which is more robust for segment counting.
 
     Args:
         chunk_segments: A list of segment dictionaries to be translated.
         target_language: The target language for translation.
-        translation_model: The name of the translation model to use.
+        translation_model: The Gemini model id to use.
         reference_material: Optional reference text to guide the translation.
-        context: A dictionary containing 'prev' and 'next' text for contextual awareness.
+        context: A dictionary containing 'prev' and 'next' text for context.
 
     Returns:
         (translated strings, token_usage) or (None, usage) on failure.
     """
-    # Serialize the main text segments into a JSON array string
     main_text_list = [seg["text"] for seg in chunk_segments]
     main_text_json = json.dumps(main_text_list, ensure_ascii=False)
 
     prev_context = context.get('prev', '')
     next_context = context.get('next', '')
 
-    prompt_template = (
+    prompt_text = (
         f"You are an expert translator and editor specializing in Korean to {target_language}.\n"
-        "Your task is two-fold: \n" 
+        "Your task is two-fold: \n"
         "1. Translate a JSON array of Korean strings. \n"
         "2. Intelligently correct transcription errors based on the provided reference material.\n\n"
 
@@ -168,53 +187,67 @@ def _translate_chunk(
     )
 
     if reference_material:
-        prompt_template += (
+        prompt_text += (
             "\nReference Material for specific terms:\n"
             f"---\n{reference_material}\n---\n"
         )
 
-    prompt_template += (
+    prompt_text += (
         "\nPrevious Context (for context, do not translate):\n"
         f"---\n{prev_context}\n---\n"
         "\nMain Text to Translate (JSON Array):\n"
         f"---\n{main_text_json}\n---\n"
         "\nNext Context (for context, do not translate):\n"
         f"---\n{next_context}\n---\n"
-        f"\nYour translated output must be a valid JSON array of {target_language} strings."
+        f"\nYour output MUST be exactly this JSON object shape and nothing else:\n"
+        f'{{\"translations\": [\"<{target_language} string 1>\", \"<{target_language} string 2>\", ...]}}\n'
+        f"The array must have exactly {len(chunk_segments)} element(s), one per input line."
     )
 
-    prompt = ChatPromptTemplate.from_template(prompt_template)
+    try:
+        client = _make_gemini_client()
+    except ValueError as exc:
+        print(f"Error: {exc}")
+        return None, None
 
-    models = openrouter_models_with_fallback(translation_model)
     last_usage: Optional[Dict[str, Any]] = None
-    for attempt, model_id in enumerate(models):
+
+    for attempt in range(_MAX_TRANSLATION_ATTEMPTS):
         if attempt > 0:
+            delay = compute_backoff(attempt - 1)
             print(
-                f"Translation: primary model failed for this chunk; "
-                f"retrying with fallback ({model_id})..."
+                f"Translation: attempt {attempt + 1}/{_MAX_TRANSLATION_ATTEMPTS} "
+                f"retrying in {delay:.1f}s..."
             )
-        model = ChatOpenAI(
-            model=model_id,
-            temperature=0,
-            openai_api_key=os.getenv("OPENROUTER_API_KEY"),
-            openai_api_base="https://openrouter.ai/api/v1",
-            default_headers={
-                "HTTP-Referer": get_openrouter_http_referer(),
-                "X-Title": "Hermecho Translation",
-            },
-            model_kwargs={"response_format": {"type": "json_object"}},
-        )
-        runnable = prompt | model
+            time.sleep(delay)
 
         try:
-            message = runnable.invoke({})
-            usage = _usage_from_langchain_message(message)
+            response = client.models.generate_content(
+                model=translation_model,
+                contents=prompt_text,
+                config=types.GenerateContentConfig(
+                    temperature=0,
+                    response_mime_type="application/json",
+                ),
+            )
+            usage = _usage_from_genai_response(response)
             last_usage = usage
             _log_translation_api_tokens("Translation API tokens", usage)
-            response_text = _message_content_to_text(message)
 
+            response_text = response.text
             response_json = json.loads(response_text)
-            translated_segments = response_json["translations"]
+            translated_segments = _extract_translations_from_response(
+                response_json, len(chunk_segments)
+            )
+
+            if translated_segments is None:
+                print(
+                    "Warning: Could not extract translations array from response. "
+                    f"Keys present: {list(response_json.keys()) if isinstance(response_json, dict) else type(response_json).__name__}"
+                )
+                if attempt + 1 < _MAX_TRANSLATION_ATTEMPTS:
+                    continue
+                return None, usage
 
             if len(translated_segments) != len(chunk_segments):
                 print(
@@ -222,22 +255,32 @@ def _translate_chunk(
                     f"Expected {len(chunk_segments)}, got "
                     f"{len(translated_segments)}."
                 )
-                if attempt + 1 < len(models):
+                if attempt + 1 < _MAX_TRANSLATION_ATTEMPTS:
                     continue
                 return None, usage
 
             return translated_segments, usage
 
-        except json.JSONDecodeError:
-            print("Warning: Failed to decode JSON from the model's response.")
-            if attempt + 1 < len(models):
+        except json.JSONDecodeError as exc:
+            response_text_preview = ""
+            try:
+                response_text_preview = response.text[:200]  # type: ignore[possibly-undefined]
+            except Exception:
+                pass
+            print(
+                f"Warning: Failed to decode JSON from the model's response: {exc}. "
+                f"Preview: {response_text_preview!r}"
+            )
+            if attempt + 1 < _MAX_TRANSLATION_ATTEMPTS:
                 continue
             return None, last_usage
         except Exception as e:
             print(f"An unexpected error occurred during chunk translation: {e}")
-            if attempt + 1 < len(models):
+            if attempt + 1 < _MAX_TRANSLATION_ATTEMPTS:
                 continue
             return None, last_usage
+
+    return None, last_usage
 
 
 def translate_segments(
@@ -248,15 +291,15 @@ def translate_segments(
 ) -> Optional[List[Dict]]:
     """
     Translates transcribed text segments using an optimized, two-layer strategy.
-    
-    For shorter texts that fit within the token threshold, it translates the entire content
-    in a single batch for maximum speed. For longer texts, it uses a sliding window approach with
-    robust JSON-based chunking and a concurrent fallback mechanism.
+
+    For shorter texts that fit within the token threshold, it translates the entire
+    content in a single batch for maximum speed. For longer texts, it uses a sliding
+    window approach with robust JSON-based chunking and a recursive fallback mechanism.
 
     Args:
         segments: A list of transcribed segments.
         target_language: The target language for the translation.
-        translation_model: The translation model to be used.
+        translation_model: The Gemini model id to use for translation.
         reference_material: Optional reference text for context-aware translation.
 
     Returns:
@@ -269,11 +312,10 @@ def translate_segments(
     # Calculate the total length to decide on the translation strategy
     full_text = "\n".join([seg["text"] for seg in segments])
     # A rough estimation of the overhead from the prompt template and reference material
-    prompt_overhead = len(reference_material or "") + 1000 
+    prompt_overhead = len(reference_material or "") + 1000
     total_length = len(full_text) + prompt_overhead
 
     try:
-        # Determine strategy
         use_sliding_window = False
         usage_totals: Dict[str, int] = {}
 
@@ -302,8 +344,6 @@ def translate_segments(
             use_sliding_window = True
 
         # Strategy 2: Sliding Window (Chunks)
-        # This runs if the text was too long initially, OR if the single batch
-        # attempt failed.
         if use_sliding_window:
             translated_segments_text = []
             num_chunks = (num_segments + CHUNK_SIZE - 1) // CHUNK_SIZE
@@ -337,7 +377,7 @@ def translate_segments(
                 )
                 _merge_api_usage_tokens(usage_totals, u)
 
-                # Fallback strategy for chunk (only if chunk fails)
+                # Fallback strategy for chunk
                 if translated_chunk is None:
                     print(
                         f"Warning: Chunk {i} failed. Attempting to split "
@@ -403,8 +443,6 @@ def translate_segments(
             original_text = segment.get("text", "").strip()
             translated_segment["source_text"] = original_text
 
-            # If the original text was a placeholder for silence, ensure the
-            # translation is empty
             if original_text == "[no speech]":
                 translated_segment["text"] = ""
             elif i < len(translated_segments_text):

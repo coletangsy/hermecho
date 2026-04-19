@@ -29,9 +29,9 @@ def _parse_arguments() -> argparse.Namespace:
     """
     parser = argparse.ArgumentParser(
         description=(
-            "Transcribe a video (default: OpenRouter multimodal; optional local "
-            "Whisper with --whisper), optionally translate, then burn subtitles. "
-            "Omit --transcribe-only for the full translate + burn pipeline."
+            "Transcribe a video with Google AI Studio Gemini (default) or local "
+            "Whisper (--whisper), translate, then burn subtitles. Omit "
+            "--transcribe-only for the full translate + burn pipeline."
         ),
     )
     parser.add_argument(
@@ -41,7 +41,7 @@ def _parse_arguments() -> argparse.Namespace:
         action="store_true",
         help=(
             "Use local Whisper for transcription instead of the default "
-            "OpenRouter multimodal path. Same downstream pipeline unless "
+            "Gemini multimodal path. Same downstream pipeline unless "
             "--transcribe-only."
         ),
     )
@@ -49,8 +49,8 @@ def _parse_arguments() -> argparse.Namespace:
         "--multimodal-model",
         default=DEFAULT_MULTIMODAL_MODEL,
         help=(
-            "OpenRouter model id for multimodal transcription "
-            f"(default: {DEFAULT_MULTIMODAL_MODEL})."
+            "Gemini model id for multimodal transcription via Google AI Studio "
+            f"(GEMINI_API_KEY). Default: {DEFAULT_MULTIMODAL_MODEL}."
         ),
     )
     parser.add_argument(
@@ -58,10 +58,10 @@ def _parse_arguments() -> argparse.Namespace:
         type=float,
         default=DEFAULT_MULTIMODAL_CHUNK_SECONDS,
         help=(
-            "Max seconds of audio per OpenRouter multimodal request "
+            "Max seconds of audio per Gemini multimodal request "
             f"(default {DEFAULT_MULTIMODAL_CHUNK_SECONDS:.0f}; minimum 60 "
             "when chunking). Longer media is split with ffmpeg. Use 0 for "
-            "one request for the entire file (may 502 on long media)."
+            "one request for the entire file."
         ),
     )
     parser.add_argument(
@@ -88,8 +88,8 @@ def _parse_arguments() -> argparse.Namespace:
                         help="The target language for translation.")
     parser.add_argument(
         "--translation_model",
-        default="google/gemini-3.1-flash-lite-preview",
-        help="OpenRouter model id for translation (default: Gemini 3.1 Flash).",
+        default="gemini-3.1-flash-lite-preview",
+        help="Gemini model id for translation via Google AI Studio (default: gemini-3.1-flash-lite-preview).",
     )
     parser.add_argument("--time_buffer", type=float, default=0.1,
                         help="Buffer time between subtitles in seconds.")
@@ -98,16 +98,15 @@ def _parse_arguments() -> argparse.Namespace:
         action=argparse.BooleanOptionalAction,
         default=True,
         help=(
-            "After translation, run a multimodal pass on chunked audio to "
+            "After translation, run a Gemini multimodal pass on chunked audio to "
             "refine subtitle start/end (Korean audio, translated text). "
-            "On by default (extra OpenRouter cost); use --no-timing-review "
-            "to skip."
+            "On by default (extra API cost); use --no-timing-review to skip."
         ),
     )
     parser.add_argument(
         "--timing-review-model",
-        default="google/gemini-3.1-flash-lite-preview",
-        help="OpenRouter model id for timing review (multimodal).",
+        default="gemini-3.1-flash-lite-preview",
+        help="Gemini model id for timing review via Google AI Studio (default: gemini-3.1-flash-lite-preview).",
     )
     parser.add_argument(
         "--timing-review-chunk-seconds",

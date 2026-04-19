@@ -3,7 +3,7 @@ This module contains utility functions for the video translator.
 """
 import os
 import re
-from typing import Optional
+from typing import Dict, List, Optional
 
 
 def load_reference_material(file_path: str) -> Optional[str]:
@@ -105,7 +105,7 @@ def extract_keywords_for_whisper(file_path: str, max_tokens: int = 200) -> str:
     return ", ".join(unique_keywords[:80])
 
 
-def _print_segments(title: str, segments: list[dict]):
+def _print_segments(title: str, segments: List[Dict]) -> None:
     """
     Prints a formatted list of subtitle segments to the console.
 

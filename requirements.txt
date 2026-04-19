@@ -12,15 +12,11 @@ ffmpeg-python
 # For subtitle generation and manipulation
 tqdm
 
-# For language model integration and translation
-langchain
-langchain-openai
-langchain-core
+# Google Generative AI SDK (Gemini)
+google-genai
+pydantic
 
 # For audio pre-processing and enhancement
 pydub
 noisereduce
 scipy # A dependency for noisereduce
-
-# For OpenRouter HTTP calls (multimodal transcription)
-requests

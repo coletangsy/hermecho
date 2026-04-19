@@ -8,7 +8,7 @@ This project is a high-performance, command-line tool for translating videos wit
 ## Key Features
 
 *   **Automated End-to-End Pipeline:** From video input to a final, subtitled video output with minimal user intervention.
-*   **High-Quality Transcription:** Defaults to **OpenRouter multimodal** (chunked audio) for timestamps; optional local **Whisper** via `--whisper` when you want an offline or API-free transcribe step.
+*   **High-Quality Transcription:** Defaults to **Google AI Studio (Gemini) multimodal** transcription (chunked audio) when you set `GEMINI_API_KEY`; you can use **OpenRouter** instead with a `provider/model` id and `OPENROUTER_API_KEY`. Optional local **Whisper** via `--whisper` for an offline or API-free transcribe step.
 *   **Intelligent, Context-Aware Translation:** Employs a Large Language Model (e.g., Gemini 2.5 Pro) with a highly optimized prompt that performs several advanced tasks:
     *   **Contextual Correction:** Uses a reference file to intelligently correct transcription errors in names and key terminology.
     *   **Smart Name Handling:** Translates names to official English stage names and preserves specific English terms.
@@ -16,7 +16,7 @@ This project is a high-performance, command-line tool for translating videos wit
     *   **Adaptive Batch Processing:** Automatically selects the best strategy (single batch vs. sliding window) based on text length.
     *   **Multi-Level Fallback:** If a translation chunk fails, it recursively splits into smaller batches (50 -> 10 segments) to isolate and resolve issues without failing the whole process.
 *   **Enhanced Transcription:**
-    *   **OpenRouter multimodal or Whisper:** By default, chunked audio goes through an OpenRouter audio-capable model; pass **`--whisper`** to transcribe locally instead.
+    *   **Gemini (AI Studio), OpenRouter multimodal, or Whisper:** By default, chunked audio uses a Gemini model via Google AI Studio (`GEMINI_API_KEY`), or OpenRouter if you pass a `provider/model` slug; use **`--whisper`** to transcribe locally instead.
     *   **Context-Aware Prompting:** Extracts keywords from reference materials to guide the transcription prompt, improving accuracy for specific terms and names.
     *   **Segment Optimization:** Automatically splits overly long segments for better subtitle readability.
     *   **Timing review (default):** After translation, a multimodal pass refines subtitle start/end times against the audio (extra API usage). Pass **`--no-timing-review`** to skip it.
@@ -40,7 +40,7 @@ This project is a high-performance, command-line tool for translating videos wit
 The video translation process is a multi-stage pipeline designed for quality and robustness:
 
 1.  **Audio Extraction:** The audio is extracted from the input video using `ffmpeg`.
-2.  **Transcription:** Audio is transcribed with **OpenRouter multimodal** chunked requests by default (or **local Whisper** with `--whisper`), using an initial prompt plus keywords from the reference file when available.
+2.  **Transcription:** Audio is transcribed with **Google AI Studio (Gemini)** or **OpenRouter** multimodal chunked requests by default, depending on `--multimodal-model` (or **local Whisper** with `--whisper`), using an initial prompt plus keywords from the reference file when available.
 3.  **Refinement:** Long segments are split for readability, and significant time gaps are filled with placeholders.
 4.  **Intelligent Translation:** The text segments are sent to an LLM. The system employs a robust strategy:
     *   **Adaptive Batching:** Attempts single-batch translation for shorter texts.
@@ -63,10 +63,10 @@ The video translation process is a multi-stage pipeline designed for quality and
     cd hermecho
     ```
 
-2.  **Create and use a virtual environment** (recommended; keeps dependencies out of your system Python and matches paths ignored by Git, such as `.venv/`):
+2.  **Create and use a Conda environment** (keeps dependencies isolated from your system Python):
     ```bash
-    python3 -m venv .venv
-    source .venv/bin/activate   # Windows: .venv\Scripts\activate
+    conda create -n hermecho python=3.11 -y
+    conda activate hermecho
     ```
 
 3.  **Install the required Python packages:**
@@ -74,21 +74,22 @@ The video translation process is a multi-stage pipeline designed for quality and
     pip install -r requirements.txt
     ```
 
-4.  **Create a `.env` file** in the root directory with your OpenRouter API key. The default pipeline uses OpenRouter for **multimodal transcription**, **translation**, and **timing review** (skip with **`--no-timing-review`**). With **`--whisper`**, transcription is local; the full pipeline still uses OpenRouter for translation and timing review unless you add **`--no-timing-review`**. **`python src/main.py clip.mp4 --whisper --transcribe-only`** never calls OpenRouter.
+4.  **Create a `.env` file** in the root directory. Default **multimodal transcription** uses **Google AI Studio** (`GEMINI_API_KEY`) with a plain Gemini model id (see `--multimodal-model` default). For OpenRouter-only transcription, set **`OPENROUTER_API_KEY`** and pass a slug such as **`google/gemini-3.1-pro-preview`**. The pipeline still uses OpenRouter for **translation** and **timing review** unless you add **`--no-timing-review`**. With **`--whisper`**, transcription is local; the full pipeline still uses OpenRouter for translation and timing review unless you add **`--no-timing-review`**. **`python src/main.py clip.mp4 --whisper --transcribe-only`** never calls OpenRouter for transcription.
     ```
+    GEMINI_API_KEY="your_google_ai_studio_key"
     OPENROUTER_API_KEY="your_openrouter_api_key"
     ```
 
 ### Running tests
 
-Unit tests live under `tests/`. Install **pytest** (not listed in `requirements.txt`; add it only in your venv for development), then run from the repository root with `src` on `PYTHONPATH` so imports match the CLI:
+Unit tests live under `tests/`. Install **pytest** (not listed in `requirements.txt`; add it only in your Conda env for development), then run from the repository root with `src` on `PYTHONPATH` so imports match the CLI:
 
 ```bash
 pip install pytest
 PYTHONPATH=src python -m pytest tests/ -v
 ```
 
-Pytest writes cache under `.pytest_cache/`; that directory is listed in `.gitignore` alongside typical virtualenv folders (`.venv/`, `venv/`, etc.).
+Pytest writes cache under `.pytest_cache/`; that directory is listed in `.gitignore` alongside typical local virtualenv folders (`.venv/`, `venv/`, etc.) if you use them.
 
 ## Usage
 
@@ -163,7 +164,7 @@ Run `python src/main.py --help` for the full list. Common options:
 | `--whisper` | Use local Whisper for transcription instead of the default OpenRouter multimodal path. |
 | `--model` | Whisper size when `--whisper` is set (`tiny` … `large`; default `large`). |
 | `--language` | Source audio language for transcription (default `ko`). |
-| `--multimodal-model` | OpenRouter model id for multimodal transcription (default matches `transcription.DEFAULT_MULTIMODAL_MODEL`, currently Gemini 3.1 Pro preview). If the slug contains `gemini-3.1` and `pro`, multimodal **transcription** retries once with `openai/gpt-audio`; other OpenRouter calls (e.g. translation, timing review) use `openai/gpt-5.4` for the same Pro family. If the slug contains `gemini-3.1` and `flash`, retries use `openai/gpt-5.4-mini`. |
+| `--multimodal-model` | Multimodal transcription model: **plain Gemini id** (e.g. `gemini-3.1-flash-lite-preview`, default from `transcription.DEFAULT_MULTIMODAL_MODEL`) uses **Google AI Studio** (`GEMINI_API_KEY`). A **OpenRouter** slug (`provider/model`, e.g. `google/gemini-3.1-pro-preview`) uses `OPENROUTER_API_KEY`. For OpenRouter Gemini 3.1 Pro, multimodal **transcription** retries once with `openai/gpt-audio`; Flash family retries use `openai/gpt-5.4-mini`. |
 | `--transcribe-only` | Stop after source-language SRT; no translation or burn-in. |
 | `--save-source-transcript` | With the full pipeline, also writes `*_transcript_source.srt` before translation. |
 | `--target_language` | Translation target (default `Traditional Chinese (Taiwan)`). |
