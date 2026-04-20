@@ -332,9 +332,13 @@ def _build_multimodal_prompt(language: str, initial_prompt: Optional[str]) -> st
         '{"start":"00:00:01,500","end":"00:00:03,100","text":"another phrase"}'
         "]}",
         "Rules:",
-        "- start and end MUST be SRT timestamp strings: HH:MM:SS,mmm "
-        "(zero-padded hours, minutes, seconds, comma then 3-digit milliseconds). "
-        "Example: \"00:00:02,500\" means 2.5 seconds from the clip start.",
+        "- start and end MUST be SRT timestamp strings in EXACTLY this format: "
+        "HH:MM:SS,mmm — two-digit hours, two-digit minutes, two-digit seconds, "
+        "a COMMA (not a colon or dot), then exactly three-digit milliseconds. "
+        "Always include all four parts. CORRECT: \"00:02:41,000\". "
+        "WRONG: \"02:41:000\" (missing hours, colon before ms). "
+        "WRONG: \"02:41:00\" (missing milliseconds). "
+        "WRONG: \"00:02:41.000\" (dot instead of comma).",
         "- Timestamps must stay within 00:00:00,000 and the length of this clip.",
         "- Hard limit: every segment MUST be 15 seconds or shorter. "
         "No exceptions. If a speaker talks continuously for longer than "
