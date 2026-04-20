@@ -73,6 +73,14 @@ def _parse_arguments() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--srt-only",
+        action="store_true",
+        help=(
+            "Run the full translate + timing-review pipeline but stop after "
+            "writing the SRT file; skip burning subtitles into the video."
+        ),
+    )
+    parser.add_argument(
         "--save-source-transcript",
         action="store_true",
         help=(
@@ -308,18 +316,23 @@ def _process_video(args: argparse.Namespace):
                 output_dir, f"{video_name}_{timestamp}_subtitles.srt")
             generate_srt(final_subtitle_segments, srt_path)
 
-            # Burn subtitles into a new video file
-            output_video_path = os.path.join(
-                output_dir, f"{video_name}_{timestamp}_translated.mp4")
-            burn_subtitles_into_video(
-                video_path,
-                os.path.abspath(srt_path),
-                os.path.abspath(output_video_path),
-                font_name=args.font_name,
-                font_size=args.font_size,
-                outline_width=args.outline_width,
-                use_box_background=args.box_background,
-            )
+            if args.srt_only:
+                print(
+                    "SRT-only mode: subtitle file written, skipping video burn-in."
+                )
+            else:
+                # Burn subtitles into a new video file
+                output_video_path = os.path.join(
+                    output_dir, f"{video_name}_{timestamp}_translated.mp4")
+                burn_subtitles_into_video(
+                    video_path,
+                    os.path.abspath(srt_path),
+                    os.path.abspath(output_video_path),
+                    font_name=args.font_name,
+                    font_size=args.font_size,
+                    outline_width=args.outline_width,
+                    use_box_background=args.box_background,
+                )
 
     finally:
         if os.path.exists(audio_path):
