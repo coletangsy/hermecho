@@ -5,6 +5,7 @@ from pydantic import BaseModel
 
 
 _SRT_TS_RE = re.compile(r"^(\d{1,2}):(\d{2}):(\d{2})[,.](\d{3})$")
+_SRT_TS_SHORT_RE = re.compile(r"^(\d{1,2}):(\d{2})[,:](\d{3})$")
 
 
 def seconds_to_srt(seconds: float) -> str:
@@ -21,10 +22,14 @@ def seconds_to_srt(seconds: float) -> str:
 def srt_to_seconds(ts: str) -> float:
     ts = ts.strip()
     m = _SRT_TS_RE.match(ts)
-    if not m:
-        raise ValueError(f"Invalid SRT timestamp: {ts!r}")
-    h, mi, s, ms = m.groups()
-    return int(h) * 3600 + int(mi) * 60 + int(s) + int(ms) / 1000
+    if m:
+        h, mi, s, ms = m.groups()
+        return int(h) * 3600 + int(mi) * 60 + int(s) + int(ms) / 1000
+    short = _SRT_TS_SHORT_RE.match(ts)
+    if short:
+        mi, s, ms = short.groups()
+        return int(mi) * 60 + int(s) + int(ms) / 1000
+    raise ValueError(f"Invalid SRT timestamp: {ts!r}")
 
 
 class TranscriptSegment(BaseModel):
