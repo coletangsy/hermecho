@@ -10,6 +10,8 @@ import time
 from collections.abc import Callable
 from typing import Any, Dict, List, Optional, Tuple
 
+from tqdm import tqdm
+
 from google import genai
 from google.genai import types
 
@@ -606,71 +608,75 @@ def _transcribe_multimodal_by_chunks(
     with tempfile.TemporaryDirectory(prefix="hermecho_mm_") as tmpdir:
         offset = 0.0
         idx = 0
-        while offset < duration_sec:
-            idx += 1
-            span = min(chunk_seconds, duration_sec - offset)
-            chunk_path = os.path.join(tmpdir, f"chunk_{idx:04d}.mp3")
-            t_end = offset + span
+        with tqdm(total=n_chunks, desc="Transcribing chunks", unit="chunk") as pbar:
+            while offset < duration_sec:
+                idx += 1
+                span = min(chunk_seconds, duration_sec - offset)
+                chunk_path = os.path.join(tmpdir, f"chunk_{idx:04d}.mp3")
+                t_end = offset + span
 
-            if not _ffmpeg_extract_chunk(audio_path, chunk_path, offset, span):
-                print(
-                    f"  Warning: ffmpeg failed for chunk {idx}/{n_chunks} "
-                    f"({offset:.0f}s–{t_end:.0f}s); skipping."
-                )
-                failed_chunks.append(idx)
+                pbar.set_postfix({"chunk": f"{idx}/{n_chunks}", "time": f"{offset:.0f}s–{t_end:.0f}s"})
+
+                if not _ffmpeg_extract_chunk(audio_path, chunk_path, offset, span):
+                    tqdm.write(
+                        f"  Warning: ffmpeg failed for chunk {idx}/{n_chunks} "
+                        f"({offset:.0f}s–{t_end:.0f}s); skipping."
+                    )
+                    failed_chunks.append(idx)
+                    offset = t_end
+                    pbar.update(1)
+                    continue
+
+                try:
+                    chunk_mb = os.path.getsize(chunk_path) / (1024 * 1024)
+                except OSError:
+                    chunk_mb = 0.0
+
+                segs: Optional[List[Dict[str, Any]]] = None
+                for retry in range(_CHUNK_MAX_RETRIES):
+                    suffix = f" (retry {retry}/{_CHUNK_MAX_RETRIES - 1})" if retry else ""
+                    tqdm.write(
+                        f"  Multimodal chunk {idx}/{n_chunks}: "
+                        f"{offset:.0f}s–{t_end:.0f}s ({chunk_mb:.1f} MB){suffix}..."
+                    )
+                    segs, _usage = transcribe_clip(
+                        chunk_path, model_id, language, initial_prompt
+                    )
+                    if segs is not None:
+                        break
+                    if retry + 1 < _CHUNK_MAX_RETRIES:
+                        tqdm.write(
+                            f"  Chunk {idx} failed; waiting 60s before retry "
+                            f"(rate-limit cooldown)..."
+                        )
+                        time.sleep(60.0)
+
+                if segs is None:
+                    tqdm.write(
+                        f"  Warning: chunk {idx}/{n_chunks} failed after all attempts; "
+                        f"skipping this window ({offset:.0f}s–{t_end:.0f}s)."
+                    )
+                    failed_chunks.append(idx)
+                else:
+                    for raw in segs:
+                        row = dict(raw)
+                        try:
+                            s0 = float(row["start"]) + offset
+                            s1 = float(row["end"]) + offset
+                        except (KeyError, TypeError, ValueError):
+                            continue
+                        row["start"] = s0
+                        row["end"] = s1
+                        merged.append(row)
+                    if idx < n_chunks and inter_chunk_sleep > 0:
+                        tqdm.write(
+                            f"  Waiting {inter_chunk_sleep:.0f}s before next chunk "
+                            "(rate-limit window)..."
+                        )
+                        time.sleep(inter_chunk_sleep)
+
+                pbar.update(1)
                 offset = t_end
-                continue
-
-            try:
-                chunk_mb = os.path.getsize(chunk_path) / (1024 * 1024)
-            except OSError:
-                chunk_mb = 0.0
-
-            segs: Optional[List[Dict[str, Any]]] = None
-            for retry in range(_CHUNK_MAX_RETRIES):
-                print(
-                    f"  Multimodal chunk {idx}/{n_chunks}: "
-                    f"{offset:.0f}s–{t_end:.0f}s ({chunk_mb:.1f} MB)"
-                    + (f" (retry {retry}/{_CHUNK_MAX_RETRIES - 1})" if retry else "")
-                    + "..."
-                )
-                segs, _usage = transcribe_clip(
-                    chunk_path, model_id, language, initial_prompt
-                )
-                if segs is not None:
-                    break
-                if retry + 1 < _CHUNK_MAX_RETRIES:
-                    print(
-                        f"  Chunk {idx} failed; waiting 60s before retry "
-                        f"(rate-limit cooldown)..."
-                    )
-                    time.sleep(60.0)
-
-            if segs is None:
-                print(
-                    f"  Warning: chunk {idx}/{n_chunks} failed after all attempts; "
-                    f"skipping this window ({offset:.0f}s–{t_end:.0f}s)."
-                )
-                failed_chunks.append(idx)
-            else:
-                for raw in segs:
-                    row = dict(raw)
-                    try:
-                        s0 = float(row["start"]) + offset
-                        s1 = float(row["end"]) + offset
-                    except (KeyError, TypeError, ValueError):
-                        continue
-                    row["start"] = s0
-                    row["end"] = s1
-                    merged.append(row)
-                if idx < n_chunks and inter_chunk_sleep > 0:
-                    print(
-                        f"  Waiting {inter_chunk_sleep:.0f}s before next chunk "
-                        "(rate-limit window)..."
-                    )
-                    time.sleep(inter_chunk_sleep)
-
-            offset = t_end
 
     if failed_chunks:
         pct = 100 * len(failed_chunks) / n_chunks

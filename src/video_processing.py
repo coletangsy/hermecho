@@ -64,6 +64,9 @@ def burn_subtitles_into_video(
     font_size: int = 24,
     outline_width: int = 0,
     use_box_background: bool = False,
+    margin_v: int = 20,
+    margin_h: int = 10,
+    alignment: int = 2,
 ):
     """
     Burns subtitles from an SRT file into a video.
@@ -76,6 +79,9 @@ def burn_subtitles_into_video(
         font_size: The font size for subtitles.
         outline_width: The width of the text outline (0 for no outline).
         use_box_background: Whether to use a black box background for subtitles.
+        margin_v: Vertical margin in pixels (distance from the frame edge).
+        margin_h: Horizontal margin in pixels applied to both left and right.
+        alignment: ASS numpad alignment (1–9); 2 = bottom-center (default).
     """
     print(f"Burning subtitles into video: {output_video_path}")
 
@@ -90,11 +96,19 @@ def burn_subtitles_into_video(
     # In BorderStyle=3, 'Outline' controls the padding of the box.
     
     if use_box_background:
-        # Box style: Opaque box (3), Padding (3), Semi-transparent black background
-        style_options = f"FontName={font_name},FontSize={font_size},Outline=3,Shadow=0,BorderStyle=3,BackColour=&H80000000"
+        style_options = (
+            f"FontName={font_name},FontSize={font_size},"
+            f"Outline=3,Shadow=0,BorderStyle=3,BackColour=&H80000000,"
+            f"MarginV={margin_v},MarginL={margin_h},MarginR={margin_h},"
+            f"Alignment={alignment}"
+        )
     else:
-        # Text only style: Outline defined by user, No shadow, Standard border (1)
-        style_options = f"FontName={font_name},FontSize={font_size},Outline={outline_width},Shadow=0,BorderStyle=1"
+        style_options = (
+            f"FontName={font_name},FontSize={font_size},"
+            f"Outline={outline_width},Shadow=0,BorderStyle=1,"
+            f"MarginV={margin_v},MarginL={margin_h},MarginR={margin_h},"
+            f"Alignment={alignment}"
+        )
 
     subtitles_filter = f"subtitles={escaped_srt_path}:force_style='{style_options}'"
 

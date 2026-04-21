@@ -178,6 +178,9 @@ Run `python src/main.py --help` for the full list. Common options:
 | `--time_buffer` | Seconds between subtitle cues after `adjust_subtitle_timing` on the **`--whisper`** path (default `0.1`). Default multimodal transcription skips that pass. |
 | `--input_dir` / `--output_dir` | Override `input` and `output` directories. |
 | `--font_name`, `--font_size`, `--outline_width`, `--box_background` | Subtitle burn-in styling (defaults: PingFang TC, 12, no outline, box background on). |
+| `--margin_v` | Vertical margin in pixels from the frame edge (default `20`). |
+| `--margin_h` | Horizontal margin in pixels for left/right padding (default `10`). |
+| `--alignment` | Subtitle alignment using ASS numpad layout: `1`=bottom-left, `2`=bottom-center (default), `3`=bottom-right, `4`=mid-left, `5`=mid-center, `6`=mid-right, `7`=top-left, `8`=top-center, `9`=top-right. |
 
 ### Output layout
 

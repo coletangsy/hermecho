@@ -8,11 +8,14 @@ the input segments so the model cannot change subtitle wording.
 from __future__ import annotations
 
 import json
+import math
 import os
 import shutil
 import tempfile
 import time
 from typing import Any, Dict, List, Optional, Tuple
+
+from tqdm import tqdm
 
 from google import genai
 from google.genai import types
@@ -446,6 +449,7 @@ def review_subtitle_timing(
         return None
 
     span_limit = max(float(chunk_seconds), 1.0)
+    n_chunks = int(math.ceil(duration / span_limit))
     working = [dict(s) for s in segments]
     tmpdir = tempfile.mkdtemp(prefix="hermecho_timing_review_")
     usage_totals: Dict[str, int] = {}
@@ -453,53 +457,61 @@ def review_subtitle_timing(
     try:
         window_start = 0.0
         chunk_idx = 0
-        while window_start < duration:
-            span = min(span_limit, duration - window_start)
-            window_end = window_start + span
-            chunk_path = os.path.join(tmpdir, f"tr_{chunk_idx:04d}.mp3")
-            if not _ffmpeg_extract_chunk(audio_path, chunk_path, window_start, span):
-                print(
-                    "Warning: ffmpeg chunk failed for timing review; "
-                    "skipping this window."
+        with tqdm(total=n_chunks, desc="Reviewing subtitle timing", unit="chunk") as pbar:
+            while window_start < duration:
+                span = min(span_limit, duration - window_start)
+                window_end = window_start + span
+                chunk_path = os.path.join(tmpdir, f"tr_{chunk_idx:04d}.mp3")
+
+                pbar.set_postfix({"chunk": f"{chunk_idx + 1}/{n_chunks}", "time": f"{window_start:.0f}s–{window_end:.0f}s"})
+
+                if not _ffmpeg_extract_chunk(audio_path, chunk_path, window_start, span):
+                    tqdm.write(
+                        "Warning: ffmpeg chunk failed for timing review; "
+                        "skipping this window."
+                    )
+                    window_start = window_end
+                    chunk_idx += 1
+                    pbar.update(1)
+                    continue
+
+                indexed = slice_segments_for_window(working, window_start, window_end)
+                if not indexed:
+                    window_start = window_end
+                    chunk_idx += 1
+                    pbar.update(1)
+                    continue
+
+                index_map = [i for i, _s in indexed]
+                payload = build_review_payload_cues(indexed, window_start, span)
+                if not payload:
+                    window_start = window_end
+                    chunk_idx += 1
+                    pbar.update(1)
+                    continue
+
+                label = f"Timing review chunk {chunk_idx + 1} API tokens"
+                parsed, usage = review_timing_chunk(
+                    chunk_path,
+                    payload,
+                    review_model,
+                    source_language,
+                    target_language,
+                    span,
+                    label,
                 )
+                _merge_usage(usage_totals, usage)
+                if parsed is not None:
+                    _apply_chunk_times(working, index_map, window_start, parsed)
+                else:
+                    tqdm.write(
+                        f"Warning: timing review chunk {chunk_idx + 1} failed; "
+                        "keeping original times for cues in this window."
+                    )
+
+                pbar.update(1)
                 window_start = window_end
                 chunk_idx += 1
-                continue
-
-            indexed = slice_segments_for_window(working, window_start, window_end)
-            if not indexed:
-                window_start = window_end
-                chunk_idx += 1
-                continue
-
-            index_map = [i for i, _s in indexed]
-            payload = build_review_payload_cues(indexed, window_start, span)
-            if not payload:
-                window_start = window_end
-                chunk_idx += 1
-                continue
-
-            label = f"Timing review chunk {chunk_idx + 1} API tokens"
-            parsed, usage = review_timing_chunk(
-                chunk_path,
-                payload,
-                review_model,
-                source_language,
-                target_language,
-                span,
-                label,
-            )
-            _merge_usage(usage_totals, usage)
-            if parsed is not None:
-                _apply_chunk_times(working, index_map, window_start, parsed)
-            else:
-                print(
-                    f"Warning: timing review chunk {chunk_idx + 1} failed; "
-                    "keeping original times for cues in this window."
-                )
-
-            window_start = window_end
-            chunk_idx += 1
 
         repaired = _clamp_and_repair_subtitles_in_order(working, duration)
         pt = usage_totals.get("prompt_tokens")
