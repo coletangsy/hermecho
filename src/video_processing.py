@@ -3,7 +3,24 @@ This module contains functions for video and audio processing.
 """
 import os
 import subprocess
-from typing import Optional
+import threading
+from typing import List, Optional
+
+from tqdm import tqdm
+
+
+def _video_duration_seconds(video_path: str) -> Optional[float]:
+    cmd = [
+        "ffprobe", "-v", "error",
+        "-show_entries", "format=duration",
+        "-of", "default=noprint_wrappers=1:nokey=1",
+        video_path,
+    ]
+    try:
+        out = subprocess.run(cmd, check=True, capture_output=True, text=True)
+        return float(out.stdout.strip())
+    except (FileNotFoundError, subprocess.CalledProcessError, ValueError):
+        return None
 
 
 def extract_audio(video_path: str) -> Optional[str]:
@@ -89,12 +106,11 @@ def burn_subtitles_into_video(
     # The srt_path needs to be escaped for ffmpeg's filtergraph syntax,
     # especially for Windows paths.
     escaped_srt_path = srt_path.replace('\\', '/').replace(':', '\\:')
-    
+
     # Construct the subtitles filter with style options
     # BorderStyle=3 is an opaque box. BorderStyle=1 is outline.
     # BackColour=&H80000000 sets the background to semi-transparent black.
     # In BorderStyle=3, 'Outline' controls the padding of the box.
-    
     if use_box_background:
         style_options = (
             f"FontName={font_name},FontSize={font_size},"
@@ -112,6 +128,8 @@ def burn_subtitles_into_video(
 
     subtitles_filter = f"subtitles={escaped_srt_path}:force_style='{style_options}'"
 
+    duration = _video_duration_seconds(video_path)
+
     command = [
         "ffmpeg",
         "-i", video_path,
@@ -120,22 +138,63 @@ def burn_subtitles_into_video(
         "-pix_fmt", "yuv420p",  # Pixel format for compatibility
         "-c:a", "aac",      # AAC audio codec for wide compatibility
         "-strict", "experimental",
+        "-progress", "pipe:1",
+        "-nostats",
         output_video_path,
-        "-y"  # Overwrite output file if it exists
+        "-y",  # Overwrite output file if it exists
     ]
 
     try:
-        subprocess.run(command, check=True,
-                       stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
-        print("Successfully burned subtitles into the video.")
+        process = subprocess.Popen(
+            command,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            bufsize=1,
+        )
+
+        stderr_lines: List[str] = []
+
+        def _drain_stderr() -> None:
+            if process.stderr:
+                for line in process.stderr:
+                    stderr_lines.append(line)
+
+        stderr_thread = threading.Thread(target=_drain_stderr, daemon=True)
+        stderr_thread.start()
+
+        total_sec = int(duration) if duration else None
+        with tqdm(total=total_sec, desc="Burning subtitles", unit="s", dynamic_ncols=True) as pbar:
+            last_sec = 0
+            if process.stdout:
+                for line in process.stdout:
+                    if line.startswith("out_time_us="):
+                        try:
+                            us = int(line.split("=", 1)[1].strip())
+                            if us >= 0:
+                                current_sec = us // 1_000_000
+                                delta = current_sec - last_sec
+                                if delta > 0:
+                                    pbar.update(delta)
+                                    last_sec = current_sec
+                        except (ValueError, IndexError):
+                            pass
+
+        process.wait()
+        stderr_thread.join(timeout=5.0)
+
+        if process.returncode != 0:
+            stderr_output = "".join(stderr_lines)
+            print("An error occurred while running ffmpeg to burn subtitles:")
+            print(f"Command: {' '.join(command)}")
+            print(f"FFmpeg stderr: {stderr_output}")
+        else:
+            print("Successfully burned subtitles into the video.")
+
     except FileNotFoundError:
         print("Error: ffmpeg is not installed. Please install it to proceed.")
         print("On macOS, you can use Homebrew: brew install ffmpeg")
-    except subprocess.CalledProcessError as e:
-        print("An error occurred while running ffmpeg to burn subtitles:")
-        print(f"Command: {' '.join(command)}")
-        print(f"FFmpeg stderr: {e.stderr.decode()}")
-    except (subprocess.CalledProcessError, FileNotFoundError) as e:
+    except Exception as e:
         print(f"An unexpected error occurred during subtitle burning: {e}")
 
 

@@ -3,8 +3,10 @@ This script provides a command-line interface to translate a video from one lang
 """
 import os
 import argparse
+import time
 from datetime import datetime
 from dotenv import load_dotenv
+from tqdm import trange
 
 from video_processing import extract_audio, burn_subtitles_into_video, is_ffmpeg_installed
 from transcription import (
@@ -27,6 +29,13 @@ def _stage_banner(current: int, total: int, label: str) -> None:
     print(f"\n{'━' * width}")
     print(f"{header}{' ' * pad}")
     print(f"{'━' * width}")
+
+
+def _stage_cooldown(seconds: int) -> None:
+    if seconds <= 0:
+        return
+    for _ in trange(seconds, desc=f"  API cooldown", unit="s", leave=False, ncols=60):
+        time.sleep(1)
 
 
 def _parse_arguments() -> argparse.Namespace:
@@ -187,6 +196,15 @@ def _parse_arguments() -> argparse.Namespace:
             "7=top-left, 8=top-center, 9=top-right."
         ),
     )
+    parser.add_argument(
+        "--stage-cooldown",
+        type=int,
+        default=60,
+        help=(
+            "Seconds to wait between pipeline stages to avoid API 503 errors "
+            "(default: 60; set to 0 to disable)."
+        ),
+    )
     return parser.parse_args()
 
 
@@ -218,6 +236,8 @@ def _process_video(args: argparse.Namespace):
 
     def next_stage(label: str) -> None:
         nonlocal stage
+        if stage > 0:
+            _stage_cooldown(args.stage_cooldown)
         stage += 1
         _stage_banner(stage, total_stages, label)
 

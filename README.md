@@ -181,6 +181,7 @@ Run `python src/main.py --help` for the full list. Common options:
 | `--margin_v` | Vertical margin in pixels from the frame edge (default `20`). |
 | `--margin_h` | Horizontal margin in pixels for left/right padding (default `10`). |
 | `--alignment` | Subtitle alignment using ASS numpad layout: `1`=bottom-left, `2`=bottom-center (default), `3`=bottom-right, `4`=mid-left, `5`=mid-center, `6`=mid-right, `7`=top-left, `8`=top-center, `9`=top-right. |
+| `--stage-cooldown` | Seconds to wait between pipeline stages to avoid API 503 errors (default `60`; set to `0` to disable). |
 
 ### Output layout
 
