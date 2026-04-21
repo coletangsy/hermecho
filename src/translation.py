@@ -6,10 +6,9 @@ import os
 import time
 from typing import Any, Dict, List, Optional, Tuple
 
-from google import genai
-from google.genai import types
 from tqdm import tqdm
 
+from gemini_sdk import load_google_genai
 from retry import compute_backoff
 
 
@@ -22,11 +21,12 @@ OVERLAP_SIZE = 3         # Number of segments to overlap
 _MAX_TRANSLATION_ATTEMPTS = 3
 
 
-def _make_gemini_client() -> genai.Client:
+def _make_gemini_client() -> Any:
     """Create a Gemini client using the GEMINI_API_KEY environment variable."""
     api_key = os.getenv("GEMINI_API_KEY")
     if not api_key:
         raise ValueError("GEMINI_API_KEY is not set.")
+    genai, _ = load_google_genai()
     return genai.Client(api_key=api_key)
 
 
@@ -214,7 +214,7 @@ def _translate_chunk(
 
     try:
         client = _make_gemini_client()
-    except ValueError as exc:
+    except (RuntimeError, ValueError) as exc:
         print(f"Error: {exc}")
         return None, None
 
@@ -230,6 +230,7 @@ def _translate_chunk(
             time.sleep(delay)
 
         try:
+            _, types = load_google_genai()
             response = client.models.generate_content(
                 model=translation_model,
                 contents=prompt_text,

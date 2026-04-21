@@ -17,9 +17,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from tqdm import tqdm
 
-from google import genai
-from google.genai import types
-
+from gemini_sdk import load_google_genai
 from models import TimingReviewResponse, seconds_to_srt, srt_to_seconds
 from retry import compute_backoff
 from transcription import (
@@ -35,10 +33,11 @@ _MIN_REVIEW_GAP_SEC = 0.015
 _MAX_REVIEW_ATTEMPTS = 3
 
 
-def _make_gemini_client() -> genai.Client:
+def _make_gemini_client() -> Any:
     api_key = os.getenv("GEMINI_API_KEY")
     if not api_key:
         raise ValueError("GEMINI_API_KEY is not set.")
+    genai, _ = load_google_genai()
     return genai.Client(api_key=api_key)
 
 
@@ -304,7 +303,7 @@ def review_timing_chunk(
     """
     try:
         client = _make_gemini_client()
-    except ValueError as exc:
+    except (RuntimeError, ValueError) as exc:
         print(f"Error: {exc}")
         return None, None
 
@@ -337,6 +336,7 @@ def review_timing_chunk(
 
         uploaded_file = None
         try:
+            _, types = load_google_genai()
             uploaded_file = client.files.upload(
                 file=chunk_audio_path,
                 config=types.UploadFileConfig(mime_type=mime_type),
