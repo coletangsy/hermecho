@@ -3,8 +3,10 @@ This script provides a command-line interface to translate a video from one lang
 """
 import os
 import argparse
+import time
 from datetime import datetime
 from dotenv import load_dotenv
+from tqdm import trange
 
 from video_processing import extract_audio, burn_subtitles_into_video, is_ffmpeg_installed
 from transcription import (
@@ -18,6 +20,22 @@ from subtitles import fill_transcription_gaps, adjust_subtitle_timing, generate_
 from utils import load_reference_material, _print_segments, extract_keywords_for_whisper
 
 load_dotenv()
+
+
+def _stage_banner(current: int, total: int, label: str) -> None:
+    width = 60
+    header = f"  Stage {current}/{total} \u25b8 {label}  "
+    pad = max(0, width - len(header))
+    print(f"\n{'━' * width}")
+    print(f"{header}{' ' * pad}")
+    print(f"{'━' * width}")
+
+
+def _stage_cooldown(seconds: int) -> None:
+    if seconds <= 0:
+        return
+    for _ in trange(seconds, desc=f"  API cooldown", unit="s", leave=False, ncols=60):
+        time.sleep(1)
 
 
 def _parse_arguments() -> argparse.Namespace:
@@ -148,6 +166,45 @@ def _parse_arguments() -> argparse.Namespace:
                         help="Subtitle outline width (0 for no outline).")
     parser.add_argument("--box_background", action="store_true", default=True,
                         help="Use a black box background for subtitles instead of an outline (default: True).")
+    parser.add_argument(
+        "--margin_v",
+        type=int,
+        default=20,
+        help=(
+            "Vertical margin for subtitles in pixels (distance from bottom "
+            "or top of frame depending on alignment). Default: 20."
+        ),
+    )
+    parser.add_argument(
+        "--margin_h",
+        type=int,
+        default=10,
+        help=(
+            "Horizontal margin for subtitles in pixels (left/right padding "
+            "from the frame edge). Default: 10."
+        ),
+    )
+    parser.add_argument(
+        "--alignment",
+        type=int,
+        default=2,
+        choices=list(range(1, 10)),
+        help=(
+            "Subtitle alignment using ASS numpad layout: "
+            "1=bottom-left, 2=bottom-center (default), 3=bottom-right, "
+            "4=mid-left, 5=mid-center, 6=mid-right, "
+            "7=top-left, 8=top-center, 9=top-right."
+        ),
+    )
+    parser.add_argument(
+        "--stage-cooldown",
+        type=int,
+        default=60,
+        help=(
+            "Seconds to wait between pipeline stages to avoid API 503 errors "
+            "(default: 60; set to 0 to disable)."
+        ),
+    )
     return parser.parse_args()
 
 
@@ -167,6 +224,24 @@ def _process_video(args: argparse.Namespace):
     Args:
         args: An argparse.Namespace object with all the required script arguments.
     """
+    total_stages = 3
+    if not args.transcribe_only:
+        total_stages += 1
+        if args.timing_review:
+            total_stages += 1
+        if not args.srt_only:
+            total_stages += 1
+
+    stage = 0
+
+    def next_stage(label: str) -> None:
+        nonlocal stage
+        if stage > 0:
+            _stage_cooldown(args.stage_cooldown)
+        stage += 1
+        _stage_banner(stage, total_stages, label)
+
+    next_stage("Extracting Audio")
     video_path = os.path.abspath(os.path.join(
         args.input_dir, args.video_filename))
     audio_path = extract_audio(video_path)
@@ -174,6 +249,7 @@ def _process_video(args: argparse.Namespace):
         return
 
     try:
+        next_stage("Transcribing Audio")
         # Context for transcription (Whisper or multimodal prompt text).
         keywords = extract_keywords_for_whisper(args.reference_file)
         full_prompt = args.initial_prompt
@@ -225,6 +301,7 @@ def _process_video(args: argparse.Namespace):
         )
 
         if args.transcribe_only:
+            next_stage("Writing Transcript SRT")
             video_name = os.path.splitext(args.video_filename)[0]
             output_dir = os.path.join(args.output_dir, video_name)
             os.makedirs(output_dir, exist_ok=True)
@@ -257,6 +334,7 @@ def _process_video(args: argparse.Namespace):
                 source_srt,
             )
 
+        next_stage(f"Translating to {args.target_language}")
         translated_segments = translate_segments(
             transcribed_segments,
             target_language=args.target_language,
@@ -267,7 +345,9 @@ def _process_video(args: argparse.Namespace):
         if translated_segments:
             translation_label = f"Translation ({args.target_language})"
             timing_review_applied = False
+
             if args.timing_review:
+                next_stage("Reviewing Subtitle Timing")
                 from timing_review import review_subtitle_timing
 
                 print(
@@ -312,6 +392,7 @@ def _process_video(args: argparse.Namespace):
                 )
                 _print_segments(label, final_subtitle_segments)
 
+            next_stage("Writing Subtitle SRT")
             srt_path = os.path.join(
                 output_dir, f"{video_name}_{timestamp}_subtitles.srt")
             generate_srt(final_subtitle_segments, srt_path)
@@ -321,7 +402,7 @@ def _process_video(args: argparse.Namespace):
                     "SRT-only mode: subtitle file written, skipping video burn-in."
                 )
             else:
-                # Burn subtitles into a new video file
+                next_stage("Burning Subtitles into Video")
                 output_video_path = os.path.join(
                     output_dir, f"{video_name}_{timestamp}_translated.mp4")
                 burn_subtitles_into_video(
@@ -332,6 +413,9 @@ def _process_video(args: argparse.Namespace):
                     font_size=args.font_size,
                     outline_width=args.outline_width,
                     use_box_background=args.box_background,
+                    margin_v=args.margin_v,
+                    margin_h=args.margin_h,
+                    alignment=args.alignment,
                 )
 
     finally:
