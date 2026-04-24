@@ -26,6 +26,10 @@ temp_audio.mp3
 input/
 output/
 
+# Local tool metadata
+.sisyphus/
+.worktrees/
+
 # references
 references/
 
