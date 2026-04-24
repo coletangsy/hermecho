@@ -8,8 +8,8 @@ This project is a high-performance, command-line tool for translating videos wit
 ## Key Features
 
 *   **Automated End-to-End Pipeline:** From video input to a final, subtitled video output with minimal user intervention.
-*   **High-Quality Transcription:** Defaults to **Google AI Studio (Gemini) multimodal** transcription (chunked audio) when you set `GEMINI_API_KEY`; you can use **OpenRouter** instead with a `provider/model` id and `OPENROUTER_API_KEY`. Optional local **Whisper** via `--whisper` for an offline or API-free transcribe step.
-*   **Intelligent, Context-Aware Translation:** Employs a Large Language Model (e.g., Gemini 2.5 Pro) with a highly optimized prompt that performs several advanced tasks:
+*   **High-Quality Transcription:** Defaults to **Google AI Studio (Gemini) multimodal** transcription (chunked audio) when you set `GEMINI_API_KEY`. Optional local **Whisper** via `--whisper` gives you an offline or API-free transcribe step.
+*   **Intelligent, Context-Aware Translation:** Employs a Large Language Model (for example `gemini-3.1-flash-lite-preview`) with a highly optimized prompt that performs several advanced tasks:
     *   **Contextual Correction:** Uses a reference file to intelligently correct transcription errors in names and key terminology.
     *   **Smart Name Handling:** Translates names to official English stage names and preserves specific English terms.
 *   **Optimized for Performance & Robustness:** The translation process is architected for speed and reliability:
@@ -22,7 +22,9 @@ This project is a high-performance, command-line tool for translating videos wit
     *   **Timing review (default):** After translation, a multimodal pass refines subtitle start/end times against the audio (extra API usage). Pass **`--no-timing-review`** to skip it.
 *   **Customizable Subtitles:**
     *   **Styling Options:** Supports custom fonts, sizes, outlines, and background boxes for professional-looking subtitles.
+    *   **Positioning Controls:** Fine-tune subtitle placement with vertical and horizontal margins plus ASS-style alignment presets (`--margin_v`, `--margin_h`, `--alignment`).
     *   **Versioning:** Output files are timestamped to prevent overwriting and allow easy version tracking.
+*   **FFmpeg Capability Check:** Detects whether your local `ffmpeg` build includes the `subtitles` filter (`libass`) before the burn-in stage and prints a clear remediation hint if it is missing.
 *   **Robust Error & Gap Handling:** The pipeline includes several guardrails for a more professional result:
     *   **Transcription Gap Filling:** Automatically detects and fills long periods of silence with a `[no speech]` placeholder.
     *   **Strict JSON Communication:** Enforces a strict JSON-based workflow with the LLM to prevent malformed outputs and conversational filler.
@@ -40,7 +42,7 @@ This project is a high-performance, command-line tool for translating videos wit
 The video translation process is a multi-stage pipeline designed for quality and robustness:
 
 1.  **Audio Extraction:** The audio is extracted from the input video using `ffmpeg`.
-2.  **Transcription:** Audio is transcribed with **Google AI Studio (Gemini)** or **OpenRouter** multimodal chunked requests by default, depending on `--multimodal-model` (or **local Whisper** with `--whisper`), using an initial prompt plus keywords from the reference file when available.
+2.  **Transcription:** Audio is transcribed with **Google AI Studio (Gemini)** multimodal chunked requests by default (or **local Whisper** with `--whisper`), using an initial prompt plus keywords from the reference file when available.
 3.  **Refinement:** Long segments are split for readability, and significant time gaps are filled with placeholders.
 4.  **Intelligent Translation:** The text segments are sent to an LLM. The system employs a robust strategy:
     *   **Adaptive Batching:** Attempts single-batch translation for shorter texts.
@@ -74,11 +76,20 @@ The video translation process is a multi-stage pipeline designed for quality and
     pip install -r requirements.txt
     ```
 
-4.  **Create a `.env` file** in the root directory. Default **multimodal transcription** uses **Google AI Studio** (`GEMINI_API_KEY`) with a plain Gemini model id (see `--multimodal-model` default). For OpenRouter-only transcription, set **`OPENROUTER_API_KEY`** and pass a slug such as **`google/gemini-3.1-pro-preview`**. The pipeline still uses OpenRouter for **translation** and **timing review** unless you add **`--no-timing-review`**. With **`--whisper`**, transcription is local; the full pipeline still uses OpenRouter for translation and timing review unless you add **`--no-timing-review`**. **`python src/main.py clip.mp4 --whisper --transcribe-only`** never calls OpenRouter for transcription.
+4.  **Create a `.env` file** in the root directory. The current pipeline uses **Google AI Studio** for multimodal transcription, translation, and timing review, so set **`GEMINI_API_KEY`**. With **`--whisper`**, only the transcription stage becomes local; translation and timing review still use Gemini unless you stop earlier with `--transcribe-only` or skip timing review with `--no-timing-review`.
     ```
     GEMINI_API_KEY="your_google_ai_studio_key"
-    OPENROUTER_API_KEY="your_openrouter_api_key"
     ```
+
+### FFmpeg note
+
+Hard-burned subtitles require an `ffmpeg` build with the `subtitles` filter (that means `libass` support is available). You can verify your local binary with:
+
+```bash
+ffmpeg -hide_banner -filters | rg subtitles
+```
+
+If that command does not show `subtitles`, reinstall `ffmpeg` with subtitle support before running the final burn-in stage.
 
 ### Running tests
 
@@ -103,7 +114,7 @@ That runs the **full pipeline**: extract audio → transcribe → (optional sour
 
 ### Quick examples
 
-**Default (OpenRouter multimodal transcribe, translate, burn-in)**
+**Default (Gemini multimodal transcribe, translate, burn-in)**
 
 ```bash
 python src/main.py episode01.mp4
@@ -125,7 +136,13 @@ python src/main.py clip.mp4 --whisper
 
 ```bash
 python src/main.py clip.mp4 \
-  --multimodal-model google/gemini-3.1-flash-lite-preview
+  --multimodal-model gemini-3.1-flash-lite-preview
+```
+
+**Write the translated SRT but skip MP4 burn-in**
+
+```bash
+python src/main.py clip.mp4 --srt-only
 ```
 
 **Keep a source-language SRT alongside the translated run**
@@ -164,13 +181,15 @@ Run `python src/main.py --help` for the full list. Common options:
 | `--whisper` | Use local Whisper for transcription instead of the default OpenRouter multimodal path. |
 | `--model` | Whisper size when `--whisper` is set (`tiny` … `large`; default `large`). |
 | `--language` | Source audio language for transcription (default `ko`). |
-| `--multimodal-model` | Multimodal transcription model: **plain Gemini id** (e.g. `gemini-3.1-flash-lite-preview`, default from `transcription.DEFAULT_MULTIMODAL_MODEL`) uses **Google AI Studio** (`GEMINI_API_KEY`). A **OpenRouter** slug (`provider/model`, e.g. `google/gemini-3.1-pro-preview`) uses `OPENROUTER_API_KEY`. For OpenRouter Gemini 3.1 Pro, multimodal **transcription** retries once with `openai/gpt-audio`; Flash family retries use `openai/gpt-5.4-mini`. |
+| `--multimodal-model` | Gemini model id for multimodal transcription via **Google AI Studio** (`GEMINI_API_KEY`). Default comes from `transcription.DEFAULT_MULTIMODAL_MODEL`. |
+| `--multimodal-chunk-seconds` | Max seconds of audio per Gemini multimodal transcription request (default from `transcription.DEFAULT_MULTIMODAL_CHUNK_SECONDS`; minimum 60 when chunking, `0` = one request for the whole file). |
 | `--transcribe-only` | Stop after source-language SRT; no translation or burn-in. |
+| `--srt-only` | Run transcription, translation, and timing review, then stop after writing the translated SRT. |
 | `--save-source-transcript` | With the full pipeline, also writes `*_transcript_source.srt` before translation. |
 | `--target_language` | Translation target (default `Traditional Chinese (Taiwan)`). |
-| `--translation_model` | OpenRouter model id for translation (default `google/gemini-3.1-flash-lite-preview`). |
+| `--translation_model` | Gemini model id for translation via Google AI Studio (default `gemini-3.1-flash-lite-preview`). |
 | `--timing-review` / `--no-timing-review` | Timing refinement after translation is **on** by default (`--no-timing-review` to skip). |
-| `--timing-review-model` | OpenRouter model for timing review (default `google/gemini-3.1-flash-lite-preview`). |
+| `--timing-review-model` | Gemini model id for timing review via Google AI Studio (default `gemini-3.1-flash-lite-preview`). |
 | `--timing-review-chunk-seconds` | Max seconds of audio per timing-review request (default `120`). |
 | `--reference_file` | Markdown (or other) reference for translation context and Whisper/multimodal prompt keywords (default `references/tripleS.md`). |
 | `--initial_prompt` | Base prompt prepended to transcription (default mentions Korean and English). |
@@ -217,9 +236,9 @@ The project is organized into a modular structure to separate concerns and impro
 │
 └── src/                  # Contains all the core application logic.
     ├── main.py             # CLI entry point and pipeline orchestration.
-    ├── video_processing.py # ffmpeg: audio extract, subtitle burn-in.
-    ├── transcription.py    # Whisper and OpenRouter multimodal transcription.
-    ├── translation.py      # LLM translation (OpenRouter via LangChain).
+    ├── video_processing.py # ffmpeg: audio extract, subtitle burn-in, filter checks.
+    ├── transcription.py    # Whisper and Gemini multimodal transcription.
+    ├── translation.py      # LLM translation via Gemini.
     ├── subtitles.py        # SRT generation, gaps, segment splits, timing buffers.
     ├── timing_review.py    # Default post-translation multimodal pass to refine cue times.
     └── utils.py            # Reference loading and Whisper keyword extraction.
