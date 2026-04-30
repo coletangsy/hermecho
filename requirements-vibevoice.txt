@@ -1,0 +1,12 @@
+# Heavy experimental VibeVoice-ASR dependencies.
+#
+# Keep these out of requirements.txt so the normal Gemini pipeline stays
+# lightweight. Use a dedicated local environment such as .venv-vibevoice.
+-r requirements-dev.txt
+
+transformers>=5.3.0
+accelerate
+torch
+soundfile
+librosa
+gradio_client

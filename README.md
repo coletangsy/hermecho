@@ -93,14 +93,45 @@ If that command does not show `subtitles`, reinstall `ffmpeg` with subtitle supp
 
 ### Running tests
 
-Unit tests live under `tests/`. Install **pytest** (not listed in `requirements.txt`; add it only in your Conda env for development), then run from the repository root with `src` on `PYTHONPATH` so imports match the CLI:
+Unit tests live under `tests/`. For development, install `requirements-dev.txt` in an isolated environment, then run from the repository root with `src` on `PYTHONPATH` so imports match the CLI:
 
 ```bash
-pip install pytest
+pip install -r requirements-dev.txt
 PYTHONPATH=src python -m pytest tests/ -v
 ```
 
 Pytest writes cache under `.pytest_cache/`; that directory is listed in `.gitignore` alongside typical local virtualenv folders (`.venv/`, `venv/`, etc.) if you use them.
+
+### Experimental VibeVoice-ASR environment
+
+VibeVoice-ASR is intentionally kept out of the normal runtime requirements because it pulls heavy local ML dependencies and model downloads. Use a separate environment when comparing Gemini transcription against local VibeVoice:
+
+```bash
+python -m venv .venv-vibevoice
+source .venv-vibevoice/bin/activate
+pip install -r requirements-vibevoice.txt
+PYTHONPATH=src python -m asr_comparison --skip-gemini --video Wsp9Z6-S0LA.mp4
+```
+
+The strongest official Transformers-compatible checkpoint is `microsoft/VibeVoice-ASR-HF`. It is an 8B BF16 model, so Apple Silicon machines with limited unified memory may fail or run slowly. The comparison runner records local hardware preflight data in `comparison_report.md`; if local inference cannot complete, rerun on a CUDA GPU before falling back to quantized community variants.
+
+Useful VibeVoice knobs:
+
+```bash
+PYTHONPATH=src python -m asr_comparison \
+  --skip-gemini \
+  --video Wsp9Z6-S0LA.mp4 \
+  --vibevoice-model microsoft/VibeVoice-ASR-HF \
+  --vibevoice-device auto \
+  --vibevoice-dtype auto \
+  --vibevoice-tokenizer-chunk-size 64000
+```
+
+For source-transcript-only probing before paying for translation and burn-in:
+
+```bash
+PYTHONPATH=src python -m asr_comparison --skip-gemini --vibevoice-transcribe-only --video Wsp9Z6-S0LA.mp4
+```
 
 ## Usage
 
