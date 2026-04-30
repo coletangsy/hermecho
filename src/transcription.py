@@ -319,7 +319,7 @@ def _build_multimodal_prompt(language: str, initial_prompt: Optional[str]) -> st
         f"The primary language is {language!r}.",
         "Transcribe all intelligible speech.",
         "Output format (strict):",
-        "- Reply with exactly ONE JSON object and nothing else.",
+        "- Reply with exactly ONE JSON value and nothing else.",
         "- No markdown code fences (no triple backticks), no labels, and no "
         "commentary before or after the JSON.",
         "- Use standard JSON: double-quoted keys and strings; escape internal "
@@ -463,10 +463,6 @@ def _transcribe_clip_gemini_sdk(
         print(f"Error: {exc}")
         return None, None
 
-    if not os.path.exists(audio_path):
-        print(f"Error: Audio file not found at {audio_path}")
-        return None, None
-
     mime_type = _infer_gemini_inline_audio_mime_type(audio_path)
     user_text = _build_multimodal_prompt(language, initial_prompt)
 
@@ -492,10 +488,16 @@ def _transcribe_clip_gemini_sdk(
                     file_uri=uploaded_file.uri,
                     mime_type=mime_type,
                 )
-                raw_mb = os.path.getsize(audio_path) / (1024 * 1024)
+                try:
+                    raw_mb = os.path.getsize(audio_path) / (1024 * 1024)
+                except OSError:
+                    raw_mb = 0.0
                 print(f"  File API upload OK ({raw_mb:.1f} MB) → {uploaded_file.uri}")
             except Exception as upload_exc:
-                raw_mb = os.path.getsize(audio_path) / (1024 * 1024)
+                try:
+                    raw_mb = os.path.getsize(audio_path) / (1024 * 1024)
+                except OSError:
+                    raw_mb = 0.0
                 print(
                     f"  Warning: File API upload failed ({upload_exc}) for "
                     f"{raw_mb:.1f} MB chunk; falling back to inline bytes."
@@ -522,31 +524,35 @@ def _transcribe_clip_gemini_sdk(
 
             _log_gemini_token_usage(usage_log_label, response)
 
-            transcript: Optional[TranscriptResponse] = response.parsed
-            if transcript is None:
-                print(
-                    "Error: SDK returned no parsed transcript (response_schema "
-                    "validation failed). Raw text preview: "
-                    + repr((response.text or "")[:400])
-                )
-                if attempt + 1 < max_attempts:
-                    continue
-                return None, None
-
             segments: List[Dict[str, Any]] = []
-            for seg in transcript.segments:
-                try:
-                    start = srt_to_seconds(seg.start)
-                    end = srt_to_seconds(seg.end)
-                except ValueError as ts_err:
-                    print(f"  Warning: skipping segment with bad timestamp: {ts_err}")
-                    continue
-                text = seg.text.strip()
-                if not text:
-                    continue
-                if end < start:
-                    start, end = end, start
-                segments.append({"start": start, "end": end, "text": text})
+            transcript: Optional[TranscriptResponse] = response.parsed
+            transcript_segments = getattr(transcript, "segments", None)
+            if transcript is not None and isinstance(transcript_segments, list):
+                for seg in transcript_segments:
+                    try:
+                        start = srt_to_seconds(seg.start)
+                        end = srt_to_seconds(seg.end)
+                    except ValueError as ts_err:
+                        print(f"  Warning: skipping segment with bad timestamp: {ts_err}")
+                        continue
+                    text = seg.text.strip()
+                    if not text:
+                        continue
+                    if end < start:
+                        start, end = end, start
+                    segments.append({"start": start, "end": end, "text": text})
+            else:
+                parsed = _parse_json_object_from_model_text(getattr(response, "text", None))
+                if parsed is None:
+                    print(
+                        "Error: SDK returned no parsed transcript (response_schema "
+                        "validation failed). Raw text preview: "
+                        + repr((getattr(response, "text", "") or "")[:400])
+                    )
+                    if attempt + 1 < max_attempts:
+                        continue
+                    return None, None
+                segments = _normalize_multimodal_segments(parsed)
 
             if not segments:
                 print("Warning: Gemini model returned no usable segments.")
