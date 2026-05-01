@@ -7,6 +7,7 @@ wheels/
 *.egg-info/
 .eggs/
 .DS_Store
+.vscode/
 
 # Virtual environments (any common name)
 .venv/
@@ -33,5 +34,4 @@ output/
 # references
 references/
 
-# Design file
-DESIGN.md
+# Generated and local media stay outside git

@@ -5,7 +5,7 @@ import subprocess
 import unittest
 from unittest.mock import patch
 
-from video_processing import (
+from hermecho.video_processing import (
     _build_subtitle_style_options,
     _build_subtitles_filter,
     _ffmpeg_supports_subtitles_filter,
@@ -40,7 +40,7 @@ class TestSubtitleFilterConstruction(unittest.TestCase):
 
 class TestFfmpegCapabilityDetection(unittest.TestCase):
 
-    @patch("video_processing.subprocess.run")
+    @patch("hermecho.video_processing.subprocess.run")
     def test_supports_subtitles_filter_when_present(self, mock_run) -> None:
         mock_run.return_value = subprocess.CompletedProcess(
             args=["ffmpeg", "-hide_banner", "-filters"],
@@ -50,7 +50,7 @@ class TestFfmpegCapabilityDetection(unittest.TestCase):
         )
         self.assertTrue(_ffmpeg_supports_subtitles_filter())
 
-    @patch("video_processing.subprocess.run")
+    @patch("hermecho.video_processing.subprocess.run")
     def test_reports_false_when_subtitles_filter_missing(self, mock_run) -> None:
         mock_run.return_value = subprocess.CompletedProcess(
             args=["ffmpeg", "-hide_banner", "-filters"],
@@ -59,4 +59,3 @@ class TestFfmpegCapabilityDetection(unittest.TestCase):
             stderr="",
         )
         self.assertFalse(_ffmpeg_supports_subtitles_filter())
-
