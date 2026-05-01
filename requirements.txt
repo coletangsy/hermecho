@@ -1,22 +1,2 @@
-
-# Core dependencies for the video translation pipeline
-
-# For handling environment variables
-python-dotenv
-dotenv
-
-# For audio and video processing
-openai-whisper
-ffmpeg-python
-
-# For subtitle generation and manipulation
-tqdm
-
-# Google Generative AI SDK (Gemini)
-google-genai
-pydantic
-
-# For audio pre-processing and enhancement
-pydub
-noisereduce
-scipy # A dependency for noisereduce
+# Compatibility installer. Primary metadata lives in pyproject.toml.
+-e .

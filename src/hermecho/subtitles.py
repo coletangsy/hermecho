@@ -8,7 +8,7 @@ from typing import Dict, List
 
 def _split_no_words(seg: Dict, max_chars: int, max_duration: float) -> List[Dict]:
     """
-    Proportional time split for multimodal segments (no word-level timestamps).
+    Proportional time split for segments without word-level timestamps.
     Time is distributed linearly by character count as a speech-rate proxy.
     """
     text = seg.get("text", "").strip()
