@@ -102,6 +102,8 @@ PYTHONPATH=src python -m pytest tests/ -v
 
 Pytest writes cache under `.pytest_cache/`; that directory is listed in `.gitignore` alongside typical local virtualenv folders (`.venv/`, `venv/`, etc.) if you use them.
 
+Local design notes and implementation plans belong under `docs/`. That directory is intentionally ignored and not tracked in Git; keep any review-ready operational guidance in this `README.md` or `AGENTS.md` instead.
+
 ### Experimental VibeVoice-ASR environment
 
 VibeVoice-ASR is intentionally kept out of the normal runtime requirements because it pulls heavy local ML dependencies and model downloads. Use a separate environment when comparing Gemini transcription against local VibeVoice:
