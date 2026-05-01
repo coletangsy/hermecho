@@ -6,7 +6,8 @@
 - Pipeline modules: `transcription.py`, `translation.py`, `timing_review.py`, `subtitles.py`, `video_processing.py`.
 - Shared types/utilities: `models.py`, `utils.py`, `retry.py`, `gemini_sdk.py`.
 - Tests live in `tests/` (notably `test_timing_review.py` and `test_transcription_multimodal.py`).
-- Runtime folders: `input/` for source media, `output/` for generated artifacts, `references/` for glossary/context files, `docs/` for design notes/plans.
+- Runtime folders: `input/` for source media, `output/` for generated artifacts, and `references/` for glossary/context files.
+- Local design notes and implementation plans may live under `docs/`, but `docs/` is ignored and not tracked in Git. Put durable setup, workflow, or operational guidance in `README.md` or `AGENTS.md`.
 
 ## Build, Test, and Development Commands
 - Install dependencies: `pip install -r requirements.txt`

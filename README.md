@@ -121,3 +121,5 @@ Run tests:
 ```bash
 python -m pytest tests/ -q
 ```
+
+Local design notes and implementation plans belong under `docs/`. That directory is intentionally ignored and not tracked in Git; keep any review-ready operational guidance in this `README.md` or `AGENTS.md` instead.
