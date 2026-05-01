@@ -17,7 +17,7 @@ The current pipeline does not include Gemini multimodal transcription, transcrip
 
 Prerequisites:
 
-- Python 3.9+
+- Python 3.11+
 - `ffmpeg` with the `subtitles` filter (`libass` support)
 
 Create an environment and install the package:
@@ -26,6 +26,14 @@ Create an environment and install the package:
 python -m venv .venv
 source .venv/bin/activate
 python -m pip install -e ".[dev]"
+```
+
+To update the existing Conda environment used for this project:
+
+```bash
+conda install -n hermecho python=3.11
+conda run -n hermecho python -m pip install -e ".[dev]"
+conda run -n hermecho python --version
 ```
 
 `requirements.txt` is kept for compatibility and installs the editable package:
@@ -119,5 +127,5 @@ src/
 Run tests:
 
 ```bash
-python -m pytest tests/ -q
+conda run -n hermecho python -m pytest tests/ -q
 ```
