@@ -5,7 +5,7 @@ import types
 import unittest
 from unittest.mock import MagicMock, patch
 
-from hermecho.translation import _translate_chunk
+from hermecho.translation import _translate_chunk, translate_segments
 
 
 class TestOpenRouterTranslation(unittest.TestCase):
@@ -74,6 +74,56 @@ class TestOpenRouterTranslation(unittest.TestCase):
                 "allow_fallbacks": True,
                 "require_parameters": True,
             },
+        )
+
+    def test_translate_segments_emits_structured_chunk_progress(self) -> None:
+        segments = [
+            {"start": float(i), "end": float(i + 1), "text": f"line {i}"}
+            for i in range(201)
+        ]
+
+        def fake_translate_chunk(chunk, *_args, **_kwargs):
+            return [f"translated {i}" for i, _ in enumerate(chunk)], None
+
+        with patch("hermecho.translation.TOKEN_THRESHOLD", 1), \
+            patch("hermecho.translation._translate_chunk", side_effect=fake_translate_chunk), \
+            patch("builtins.print") as mock_print:
+            translated = translate_segments(
+                segments,
+                target_language="Traditional Chinese (Taiwan)",
+                translation_model="test-model",
+                reference_material=None,
+            )
+
+        self.assertEqual(len(translated or []), 201)
+        progress_lines = [
+            call.args[0]
+            for call in mock_print.call_args_list
+            if call.args and call.args[0].startswith("HERMECHO_PROGRESS ")
+        ]
+        events = [
+            json.loads(line.removeprefix("HERMECHO_PROGRESS "))
+            for line in progress_lines
+        ]
+
+        self.assertIn(
+            {
+                "stage": "translation_strategy",
+                "status": "running",
+                "message": "Using sliding window translation",
+                "total": 2,
+            },
+            events,
+        )
+        self.assertIn(
+            {
+                "stage": "translation",
+                "status": "running",
+                "message": "Translating chunk 2/2",
+                "current": 2,
+                "total": 2,
+            },
+            events,
         )
 
 

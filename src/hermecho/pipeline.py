@@ -8,6 +8,7 @@ from datetime import datetime
 
 from tqdm import trange
 
+from .progress import emit_progress
 from .subtitles import (
     adjust_subtitle_timing,
     fill_transcription_gaps,
@@ -78,12 +79,16 @@ def process_video(config: PipelineConfig) -> None:
 
     next_stage("Extracting Audio")
     video_path = os.path.abspath(os.path.join(config.input_dir, config.video_filename))
+    emit_progress("audio_extraction", "running", "Extracting audio")
     audio_path = extract_audio(video_path)
     if not audio_path:
+        emit_progress("audio_extraction", "error", "Audio extraction failed")
         return
+    emit_progress("audio_extraction", "complete", "Audio extracted", detail=audio_path)
 
     try:
         next_stage("Transcribing Audio")
+        emit_progress("transcription", "running", "Transcribing audio")
         transcribed_segments = transcribe_audio(
             audio_path,
             model=config.model,
@@ -91,7 +96,16 @@ def process_video(config: PipelineConfig) -> None:
             temperature=config.temperature,
         )
         if not transcribed_segments:
+            emit_progress("transcription", "error", "Audio transcription failed")
             return
+        emit_progress(
+            "transcription",
+            "complete",
+            "Audio transcribed",
+            current=len(transcribed_segments),
+            total=len(transcribed_segments),
+            pct=100,
+        )
 
         _print_segments(f"Original Transcription ({config.language})", transcribed_segments)
 
@@ -109,8 +123,17 @@ def process_video(config: PipelineConfig) -> None:
         if config.transcribe_only:
             next_stage("Writing Transcript SRT")
             srt_path = os.path.join(output_dir, f"{video_name}_{timestamp}_transcript.srt")
+            emit_progress("source_srt_write", "running", "Writing transcript SRT")
             generate_srt(transcribed_segments, srt_path)
+            emit_progress(
+                "source_srt_write",
+                "complete",
+                "Transcript SRT written",
+                detail=srt_path,
+                pct=100,
+            )
             print("Transcribe-only mode: done (no translation or burn-in).")
+            emit_progress("completion", "complete", "Hermecho pipeline completed", pct=100)
             return
 
         reference_material = load_reference_material(config.reference_file)
@@ -120,9 +143,22 @@ def process_video(config: PipelineConfig) -> None:
                 output_dir,
                 f"{video_name}_{timestamp}_transcript_source.srt",
             )
+            emit_progress("source_srt_write", "running", "Writing source transcript SRT")
             generate_srt(transcribed_segments, source_srt)
+            emit_progress(
+                "source_srt_write",
+                "complete",
+                "Source transcript SRT written",
+                detail=source_srt,
+                pct=100,
+            )
 
         next_stage(f"Translating to {config.target_language}")
+        emit_progress(
+            "translation",
+            "running",
+            f"Translating to {config.target_language}",
+        )
         translated_segments = translate_segments(
             transcribed_segments,
             target_language=config.target_language,
@@ -131,21 +167,51 @@ def process_video(config: PipelineConfig) -> None:
         )
 
         if translated_segments:
+            emit_progress(
+                "translation",
+                "complete",
+                "Translation completed",
+                current=len(translated_segments),
+                total=len(transcribed_segments),
+                pct=100,
+            )
             translation_label = f"Translation ({config.target_language})"
             _print_segments(translation_label, translated_segments)
 
+            emit_progress(
+                "subtitle_timing_adjustment",
+                "running",
+                "Adjusting subtitle timing",
+            )
             final_subtitle_segments = adjust_subtitle_timing(
                 translated_segments,
                 config.time_buffer,
+            )
+            emit_progress(
+                "subtitle_timing_adjustment",
+                "complete",
+                "Subtitle timing adjusted",
+                current=len(final_subtitle_segments),
+                total=len(translated_segments),
+                pct=100,
             )
             _print_segments("Adjusted Subtitles", final_subtitle_segments)
 
             next_stage("Writing Subtitle SRT")
             srt_path = os.path.join(output_dir, f"{video_name}_{timestamp}_subtitles.srt")
+            emit_progress("translated_srt_write", "running", "Writing translated SRT")
             generate_srt(final_subtitle_segments, srt_path)
+            emit_progress(
+                "translated_srt_write",
+                "complete",
+                "Translated SRT written",
+                detail=srt_path,
+                pct=100,
+            )
 
             if config.srt_only:
                 print("SRT-only mode: subtitle file written, skipping video burn-in.")
+                emit_progress("completion", "complete", "Hermecho pipeline completed", pct=100)
             else:
                 next_stage("Burning Subtitles into Video")
                 output_video_path = os.path.join(
@@ -164,6 +230,9 @@ def process_video(config: PipelineConfig) -> None:
                     margin_h=config.margin_h,
                     alignment=config.alignment,
                 )
+                emit_progress("completion", "complete", "Hermecho pipeline completed", pct=100)
+        else:
+            emit_progress("translation", "error", "Translation failed")
 
     finally:
         if os.path.exists(audio_path):

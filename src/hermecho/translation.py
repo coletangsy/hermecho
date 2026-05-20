@@ -8,6 +8,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from tqdm import tqdm
 
+from .progress import emit_progress
 from .prompts import build_translation_prompt
 from .retry import compute_backoff
 
@@ -329,7 +330,18 @@ def translate_segments(
                 "Text is short enough. Attempting to translate in a "
                 "single batch."
             )
+            emit_progress(
+                "translation_strategy",
+                "running",
+                "Using single batch translation",
+                total=1,
+            )
             with tqdm(total=1, desc="Translating (single batch)", unit="batch") as pbar:
+                emit_progress(
+                    "translation",
+                    "running",
+                    "Translating single batch",
+                )
                 translated_segments_text, chunk_usage = _translate_chunk(
                     segments,
                     target_language,
@@ -354,6 +366,12 @@ def translate_segments(
         if use_sliding_window:
             translated_segments_text = []
             num_chunks = (num_segments + CHUNK_SIZE - 1) // CHUNK_SIZE
+            emit_progress(
+                "translation_strategy",
+                "running",
+                "Using sliding window translation",
+                total=num_chunks,
+            )
 
             for i in tqdm(
                 range(num_chunks),
@@ -376,6 +394,13 @@ def translate_segments(
                     'next': "\n".join([seg["text"] for seg in next_context_segments])
                 }
 
+                emit_progress(
+                    "translation",
+                    "running",
+                    f"Translating chunk {i + 1}/{num_chunks}",
+                    current=i + 1,
+                    total=num_chunks,
+                )
                 translated_chunk, u = _translate_chunk(
                     chunk,
                     target_language,
@@ -437,6 +462,13 @@ def translate_segments(
 
                 if translated_chunk:
                     translated_segments_text.extend(translated_chunk)
+                    emit_progress(
+                        "translation",
+                        "complete",
+                        f"Translated chunk {i + 1}/{num_chunks}",
+                        current=i + 1,
+                        total=num_chunks,
+                    )
 
         _log_translation_api_tokens(
             "Translation API tokens — cumulative (reported chunks)",
@@ -466,8 +498,22 @@ def translate_segments(
             final_segments.append(translated_segment)
 
         print("Text translated successfully.")
+        emit_progress(
+            "translation",
+            "complete",
+            "Text translated successfully",
+            current=len(final_segments),
+            total=num_segments,
+            pct=100,
+        )
         return final_segments
 
     except Exception as e:
         print(f"An error occurred during text translation: {e}")
+        emit_progress(
+            "translation",
+            "error",
+            "An error occurred during text translation",
+            detail=str(e),
+        )
         return None
