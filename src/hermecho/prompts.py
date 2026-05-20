@@ -1,4 +1,4 @@
-"""Prompt construction helpers for Gemini translation."""
+"""Prompt construction helpers for OpenRouter translation."""
 from __future__ import annotations
 
 import json
@@ -68,4 +68,3 @@ def build_translation_prompt(
         f'The dict must have exactly {len(chunk_segments)} key(s), one string index per input segment ("0" through "{len(chunk_segments) - 1}").'
     )
     return prompt_text
-

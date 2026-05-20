@@ -1,5 +1,5 @@
 """
-This module contains functions for translating text using Google Generative AI.
+This module contains functions for translating text using OpenRouter.
 """
 import json
 import os
@@ -8,13 +8,12 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from tqdm import tqdm
 
-from .gemini_sdk import load_google_genai
 from .prompts import build_translation_prompt
 from .retry import compute_backoff
 
 
 # Constants for the sliding window approach
-# Let's set a threshold of 128k characters, which is a safe limit for models like Gemini 1.5 Pro (approx 32k tokens)
+# Approximate character threshold for a single translation request.
 TOKEN_THRESHOLD = 128000  # Max characters to send in a single prompt
 CHUNK_SIZE = 200          # Number of segments per chunk, increased for better performance
 OVERLAP_SIZE = 3         # Number of segments to overlap
@@ -22,13 +21,27 @@ OVERLAP_SIZE = 3         # Number of segments to overlap
 _MAX_TRANSLATION_ATTEMPTS = 3
 
 
-def _make_gemini_client() -> Any:
-    """Create a Gemini client using the GEMINI_API_KEY environment variable."""
-    api_key = os.getenv("GEMINI_API_KEY")
+OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
+OPENROUTER_PROVIDER_ROUTING = {
+    "order": ["alibaba", "atlas-cloud/fp8"],
+    "allow_fallbacks": True,
+    "require_parameters": True,
+}
+
+
+def _make_openrouter_client() -> Any:
+    """Create an OpenRouter client using the OPENROUTER_API_KEY environment variable."""
+    api_key = os.getenv("OPENROUTER_API_KEY")
     if not api_key:
-        raise ValueError("GEMINI_API_KEY is not set.")
-    genai, _ = load_google_genai()
-    return genai.Client(api_key=api_key)
+        raise ValueError("OPENROUTER_API_KEY is not set.")
+    try:
+        from openai import OpenAI
+    except ImportError as exc:
+        raise RuntimeError(
+            "`openai` is required for translation. Install project dependencies "
+            "with `python -m pip install -e .`."
+        ) from exc
+    return OpenAI(api_key=api_key, base_url=OPENROUTER_BASE_URL)
 
 
 def _merge_api_usage_tokens(
@@ -48,7 +61,7 @@ def _log_translation_api_tokens(
     label: str,
     usage: Optional[Dict[str, Any]],
 ) -> None:
-    """Print token usage from a Gemini generate_content response."""
+    """Print token usage from an OpenAI-compatible chat completion response."""
     if not usage:
         print(f"{label}: (no usage metadata)")
         return
@@ -68,29 +81,58 @@ def _log_translation_api_tokens(
         print(f"{label}: usage={usage!r}")
 
 
-def _usage_from_genai_response(response: Any) -> Optional[Dict[str, Any]]:
-    """
-    Extract token usage from a google-genai GenerateContentResponse.
+def _read_usage_field(usage: Any, key: str) -> Optional[int]:
+    if usage is None:
+        return None
+    if isinstance(usage, dict):
+        value = usage.get(key)
+    else:
+        value = getattr(usage, key, None)
+    return int(value) if value is not None else None
 
-    Maps usageMetadata fields to a canonical dict with prompt_tokens,
-    completion_tokens, total_tokens.
+
+def _usage_from_openai_response(response: Any) -> Optional[Dict[str, Any]]:
+    """
+    Extract token usage from an OpenAI-compatible chat completion response.
+
+    Maps OpenAI usage fields to a canonical dict with prompt_tokens,
+    completion_tokens, and total_tokens.
     """
     if response is None:
         return None
-    um = getattr(response, "usage_metadata", None)
-    if um is None:
+    usage = getattr(response, "usage", None)
+    if usage is None:
         return None
     out: Dict[str, Any] = {}
-    pt = getattr(um, "prompt_token_count", None)
-    ct = getattr(um, "candidates_token_count", None)
-    tt = getattr(um, "total_token_count", None)
+    pt = _read_usage_field(usage, "prompt_tokens")
+    ct = _read_usage_field(usage, "completion_tokens")
+    tt = _read_usage_field(usage, "total_tokens")
     if pt is not None:
-        out["prompt_tokens"] = int(pt)
+        out["prompt_tokens"] = pt
     if ct is not None:
-        out["completion_tokens"] = int(ct)
+        out["completion_tokens"] = ct
     if tt is not None:
-        out["total_tokens"] = int(tt)
+        out["total_tokens"] = tt
     return out if out else None
+
+
+def _message_content_from_openai_response(response: Any) -> str:
+    """Return the first assistant message content from a chat completion."""
+    choices = getattr(response, "choices", None)
+    if not choices:
+        raise ValueError("OpenRouter response did not include any choices.")
+    choice = choices[0]
+    if isinstance(choice, dict):
+        message = choice.get("message")
+    else:
+        message = getattr(choice, "message", None)
+    if isinstance(message, dict):
+        content = message.get("content")
+    else:
+        content = getattr(message, "content", None)
+    if not isinstance(content, str):
+        raise ValueError("OpenRouter response message did not include text content.")
+    return content
 
 
 def _extract_translations_from_response(
@@ -140,7 +182,7 @@ def _translate_chunk(
     context: Dict[str, str],
 ) -> Tuple[Optional[List[str]], Optional[Dict[str, Any]]]:
     """
-    Translates a single chunk of subtitle segments using Gemini.
+    Translates a single chunk of subtitle segments using OpenRouter.
 
     Formats the text segments as a JSON array and instructs the model to
     return a translated JSON array, which is more robust for segment counting.
@@ -148,7 +190,7 @@ def _translate_chunk(
     Args:
         chunk_segments: A list of segment dictionaries to be translated.
         target_language: The target language for translation.
-        translation_model: The Gemini model id to use.
+        translation_model: The OpenRouter model slug to use.
         reference_material: Optional reference text to guide the translation.
         context: A dictionary containing 'prev' and 'next' text for context.
 
@@ -163,7 +205,7 @@ def _translate_chunk(
     )
 
     try:
-        client = _make_gemini_client()
+        client = _make_openrouter_client()
     except (RuntimeError, ValueError) as exc:
         print(f"Error: {exc}")
         return None, None
@@ -180,20 +222,18 @@ def _translate_chunk(
             time.sleep(delay)
 
         try:
-            _, types = load_google_genai()
-            response = client.models.generate_content(
+            response = client.chat.completions.create(
                 model=translation_model,
-                contents=prompt_text,
-                config=types.GenerateContentConfig(
-                    temperature=0,
-                    response_mime_type="application/json",
-                ),
+                messages=[{"role": "user", "content": prompt_text}],
+                temperature=0,
+                response_format={"type": "json_object"},
+                extra_body={"provider": OPENROUTER_PROVIDER_ROUTING},
             )
-            usage = _usage_from_genai_response(response)
+            usage = _usage_from_openai_response(response)
             last_usage = usage
             _log_translation_api_tokens("Translation API tokens", usage)
 
-            response_text = response.text
+            response_text = _message_content_from_openai_response(response)
             response_json = json.loads(response_text)
             translated_segments = _extract_translations_from_response(
                 response_json, len(chunk_segments)
@@ -229,7 +269,7 @@ def _translate_chunk(
         except json.JSONDecodeError as exc:
             response_text_preview = ""
             try:
-                response_text_preview = response.text[:200]  # type: ignore[possibly-undefined]
+                response_text_preview = _message_content_from_openai_response(response)[:200]  # type: ignore[possibly-undefined]
             except Exception:
                 pass
             print(
@@ -264,7 +304,7 @@ def translate_segments(
     Args:
         segments: A list of transcribed segments.
         target_language: The target language for the translation.
-        translation_model: The Gemini model id to use for translation.
+        translation_model: The OpenRouter model slug to use for translation.
         reference_material: Optional reference text for context-aware translation.
 
     Returns:

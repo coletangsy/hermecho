@@ -46,6 +46,7 @@ class TestCliArguments(unittest.TestCase):
         self.assertEqual(config.model, "large")
         self.assertEqual(config.language, "ko")
         self.assertEqual(config.target_language, "Traditional Chinese (Taiwan)")
+        self.assertEqual(config.translation_model, "deepseek/deepseek-v4-pro")
         self.assertFalse(config.transcribe_only)
         self.assertFalse(config.srt_only)
         self.assertTrue(config.box_background)
@@ -79,7 +80,7 @@ class TestPipelineOrchestration(unittest.TestCase):
             model="tiny",
             language="ko",
             target_language="Traditional Chinese (Taiwan)",
-            translation_model="gemini-test",
+            translation_model="openrouter-test",
             time_buffer=0.25,
             input_dir="input",
             output_dir=tempfile.mkdtemp(),
@@ -134,7 +135,7 @@ class TestPipelineOrchestration(unittest.TestCase):
             model="tiny",
             language="ko",
             target_language="Traditional Chinese (Taiwan)",
-            translation_model="gemini-test",
+            translation_model="openrouter-test",
             time_buffer=0.1,
             input_dir="input",
             output_dir=tempfile.mkdtemp(),

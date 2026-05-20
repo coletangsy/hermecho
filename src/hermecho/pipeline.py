@@ -29,7 +29,7 @@ class PipelineConfig:
     model: str = "large"
     language: str = "ko"
     target_language: str = "Traditional Chinese (Taiwan)"
-    translation_model: str = "gemini-3.1-flash-lite-preview"
+    translation_model: str = "deepseek/deepseek-v4-pro"
     time_buffer: float = 0.1
     input_dir: str = "input"
     output_dir: str = "output"
@@ -168,4 +168,3 @@ def process_video(config: PipelineConfig) -> None:
     finally:
         if os.path.exists(audio_path):
             os.remove(audio_path)
-
