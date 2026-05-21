@@ -1,7 +1,9 @@
 """
 Unit tests for subtitle burn filter construction and ffmpeg capability checks.
 """
+import json
 import subprocess
+import types
 import unittest
 from unittest.mock import patch
 
@@ -9,6 +11,7 @@ from hermecho.video_processing import (
     _build_subtitle_style_options,
     _build_subtitles_filter,
     _ffmpeg_supports_subtitles_filter,
+    burn_subtitles_into_video,
 )
 
 
@@ -59,3 +62,66 @@ class TestFfmpegCapabilityDetection(unittest.TestCase):
             stderr="",
         )
         self.assertFalse(_ffmpeg_supports_subtitles_filter())
+
+
+class TestSubtitleBurnProgress(unittest.TestCase):
+
+    @patch("hermecho.video_processing._ffmpeg_supports_subtitles_filter", return_value=True)
+    @patch("hermecho.video_processing._video_duration_seconds", return_value=10.0)
+    @patch("hermecho.video_processing.subprocess.Popen")
+    @patch("builtins.print")
+    def test_burn_subtitles_emits_structured_progress(
+        self,
+        mock_print,
+        mock_popen,
+        _mock_duration,
+        _mock_filter,
+    ) -> None:
+        process = types.SimpleNamespace(
+            stdout=[
+                "out_time_us=1000000\n",
+                "out_time_us=5000000\n",
+                "progress=end\n",
+            ],
+            stderr=[],
+            returncode=0,
+            wait=lambda: None,
+        )
+        mock_popen.return_value = process
+
+        burn_subtitles_into_video(
+            "/tmp/in.mp4",
+            "/tmp/subs.srt",
+            "/tmp/out.mp4",
+        )
+
+        progress_lines = [
+            call.args[0]
+            for call in mock_print.call_args_list
+            if call.args and call.args[0].startswith("HERMECHO_PROGRESS ")
+        ]
+        events = [
+            json.loads(line.removeprefix("HERMECHO_PROGRESS "))
+            for line in progress_lines
+        ]
+
+        self.assertIn(
+            {
+                "stage": "burn_in",
+                "status": "running",
+                "message": "Burning subtitles 5/10s",
+                "current": 5,
+                "total": 10,
+                "pct": 50,
+            },
+            events,
+        )
+        self.assertIn(
+            {
+                "stage": "burn_in",
+                "status": "complete",
+                "message": "Successfully burned subtitles into the video",
+                "pct": 100,
+            },
+            events,
+        )

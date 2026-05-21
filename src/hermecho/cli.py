@@ -14,7 +14,7 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     """Parse Hermecho command-line arguments."""
     parser = argparse.ArgumentParser(
         description=(
-            "Transcribe a video with local Whisper, translate with Gemini, "
+            "Transcribe a video with local Whisper, translate through OpenRouter, "
             "then burn subtitles. Omit --transcribe-only for the full "
             "translate + burn pipeline."
         ),
@@ -44,8 +44,8 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     )
     parser.add_argument(
         "--translation_model",
-        default="gemini-3.1-flash-lite-preview",
-        help="Gemini model id for translation via Google AI Studio.",
+        default="deepseek/deepseek-v4-pro",
+        help="OpenRouter model slug for translation.",
     )
     parser.add_argument("--time_buffer", type=float, default=0.1, help="Buffer time between subtitles in seconds.")
     parser.add_argument("--input_dir", default="input", help="The directory where the input video is located.")
@@ -97,4 +97,3 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
 
 if __name__ == "__main__":
     main()
-

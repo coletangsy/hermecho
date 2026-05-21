@@ -8,6 +8,8 @@ from typing import List, Optional
 
 from tqdm import tqdm
 
+from .progress import emit_progress
+
 
 def _escape_filter_value(value: str) -> str:
     """
@@ -165,11 +167,22 @@ def burn_subtitles_into_video(
         alignment: ASS numpad alignment (1–9); 2 = bottom-center (default).
     """
     print(f"Burning subtitles into video: {output_video_path}")
+    emit_progress(
+        "burn_in",
+        "running",
+        "Starting subtitle burn-in",
+        pct=0,
+    )
 
     if not _ffmpeg_supports_subtitles_filter():
         print(
             "Error: Your ffmpeg build does not include the `subtitles` filter "
             "(libass support is required for hard-burned subtitles)."
+        )
+        emit_progress(
+            "burn_in",
+            "error",
+            "ffmpeg subtitles filter is unavailable",
         )
         print(
             "Verify with: ffmpeg -hide_banner -filters | rg subtitles"
@@ -243,6 +256,21 @@ def burn_subtitles_into_video(
                                 if delta > 0:
                                     pbar.update(delta)
                                     last_sec = current_sec
+                                    pct = None
+                                    if total_sec:
+                                        pct = min(100, int((current_sec / total_sec) * 100))
+                                    emit_progress(
+                                        "burn_in",
+                                        "running",
+                                        (
+                                            f"Burning subtitles {current_sec}/{total_sec}s"
+                                            if total_sec
+                                            else f"Burning subtitles {current_sec}s"
+                                        ),
+                                        current=current_sec,
+                                        total=total_sec,
+                                        pct=pct,
+                                    )
                         except (ValueError, IndexError):
                             pass
 
@@ -254,14 +282,37 @@ def burn_subtitles_into_video(
             print("An error occurred while running ffmpeg to burn subtitles:")
             print(f"Command: {' '.join(command)}")
             print(f"FFmpeg stderr: {stderr_output}")
+            emit_progress(
+                "burn_in",
+                "error",
+                "An error occurred while running ffmpeg to burn subtitles",
+                detail=stderr_output,
+            )
         else:
             print("Successfully burned subtitles into the video.")
+            emit_progress(
+                "burn_in",
+                "complete",
+                "Successfully burned subtitles into the video",
+                pct=100,
+            )
 
     except FileNotFoundError:
         print("Error: ffmpeg is not installed. Please install it to proceed.")
         print("On macOS, you can use Homebrew: brew install ffmpeg")
+        emit_progress(
+            "burn_in",
+            "error",
+            "ffmpeg is not installed",
+        )
     except Exception as e:
         print(f"An unexpected error occurred during subtitle burning: {e}")
+        emit_progress(
+            "burn_in",
+            "error",
+            "An unexpected error occurred during subtitle burning",
+            detail=str(e),
+        )
 
 
 def is_ffmpeg_installed() -> bool:
