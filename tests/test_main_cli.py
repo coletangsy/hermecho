@@ -44,7 +44,7 @@ class TestCliArguments(unittest.TestCase):
         self.assertIsInstance(config, PipelineConfig)
         self.assertEqual(config.video_filename, "clip.mp4")
         self.assertEqual(config.model, "large")
-        self.assertEqual(config.language, "ko")
+        self.assertIsNone(config.language)
         self.assertEqual(config.target_language, "Traditional Chinese (Taiwan)")
         self.assertEqual(config.translation_model, "deepseek/deepseek-v4-pro")
         self.assertFalse(config.transcribe_only)

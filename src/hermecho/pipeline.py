@@ -5,6 +5,7 @@ import os
 import time
 from dataclasses import dataclass
 from datetime import datetime
+from typing import Optional
 
 from tqdm import trange
 
@@ -28,7 +29,7 @@ class PipelineConfig:
     srt_only: bool = False
     save_source_transcript: bool = False
     model: str = "large"
-    language: str = "ko"
+    language: Optional[str] = None
     target_language: str = "Traditional Chinese (Taiwan)"
     translation_model: str = "deepseek/deepseek-v4-pro"
     time_buffer: float = 0.1
@@ -107,7 +108,10 @@ def process_video(config: PipelineConfig) -> None:
             pct=100,
         )
 
-        _print_segments(f"Original Transcription ({config.language})", transcribed_segments)
+        _print_segments(
+            f"Original Transcription ({config.language or 'auto'})",
+            transcribed_segments,
+        )
 
         transcribed_segments = split_long_segments(transcribed_segments)
         _print_segments("Transcription after Splitting", transcribed_segments)
