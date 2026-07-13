@@ -8,7 +8,7 @@ from typing import Dict, List, Optional
 def transcribe_audio(
     audio_path: str,
     model: str,
-    language: str,
+    language: Optional[str],
     temperature: float = 0.0,
 ) -> Optional[List[Dict]]:
     """
@@ -24,7 +24,7 @@ def transcribe_audio(
         print(f"Loading local Whisper model ({model})...")
         whisper_model = whisper.load_model(model)
 
-        print(f"Transcribing audio locally (language: {language})...")
+        print(f"Transcribing audio locally (language: {language or 'auto'})...")
         result = whisper_model.transcribe(  # type: ignore
             audio_path,
             language=language,
@@ -43,7 +43,7 @@ def transcribe_audio(
             print(f"  - Detected language: {detected_language}")
             print(
                 "  - This could be due to no speech, or the language "
-                f"'({language})' being incorrect."
+                f"'({language or 'auto'})' being incorrect."
             )
             return []
 

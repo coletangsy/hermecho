@@ -93,7 +93,7 @@ Run `hermecho --help` for the full list.
 | --- | --- |
 | `video_filename` | File name inside `--input_dir`. |
 | `--model` | Whisper model size, default `large`. |
-| `--language` | Source audio language, default `ko`. |
+| `--language` | Source audio language, auto-detected by default. |
 | `--target_language` | Translation target, default `Traditional Chinese (Taiwan)`. |
 | `--translation_model` | OpenRouter model slug, default `deepseek/deepseek-v4-pro`. |
 | `--reference_file` | Translation reference material, default `references/tripleS.md`. |

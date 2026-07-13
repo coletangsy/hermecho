@@ -33,7 +33,7 @@ class TestTranscribeAudio(unittest.TestCase):
                 out = transcribe_audio(
                     path,
                     model="base",
-                    language="ko",
+                    language=None,
                     temperature=0.2,
                 )
         finally:
@@ -45,7 +45,7 @@ class TestTranscribeAudio(unittest.TestCase):
         kwargs = mock_whisper_model.transcribe.call_args.kwargs
         self.assertNotIn("initial_prompt", kwargs)
         self.assertNotIn("carry_initial_prompt", kwargs)
-        self.assertEqual(kwargs["language"], "ko")
+        self.assertIsNone(kwargs["language"])
         self.assertEqual(kwargs["temperature"], 0.2)
 
     def test_empty_whisper_segments_returns_empty_list(self) -> None:

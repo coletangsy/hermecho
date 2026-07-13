@@ -20,6 +20,7 @@
 - Helpful check: `conda run -n hermecho hermecho --help`
 
 `ffmpeg` must be installed and available on PATH.
+Normal transcription auto-detects the source language from the first 30 seconds by default; pass `--language` to force a specific language.
 
 ## Coding Style & Naming Conventions
 - Language: Python 3.11+.
