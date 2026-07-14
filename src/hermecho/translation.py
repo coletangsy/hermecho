@@ -294,6 +294,7 @@ def translate_segments(
     target_language: str,
     translation_model: str,
     reference_material: Optional[str],
+    preserve_punctuation: bool = False,
 ) -> Optional[List[Dict]]:
     """
     Translates transcribed text segments using an optimized, two-layer strategy.
@@ -488,10 +489,11 @@ def translate_segments(
                 translated_segment["text"] = ""
             elif i < len(translated_segments_text):
                 translated_text = translated_segments_text[i]
-                # Clean up punctuation
-                translated_text = translated_text.replace("，", " ").replace(
-                    "。", " "
-                ).strip()
+                if not preserve_punctuation:
+                    translated_text = translated_text.replace("，", " ").replace(
+                        "。", " "
+                    )
+                translated_text = translated_text.strip()
                 translated_segment["text"] = translated_text
             else:
                 translated_segment["text"] = ""

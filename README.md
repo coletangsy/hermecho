@@ -10,6 +10,7 @@ Hermecho translates videos with Korean audio into Traditional Chinese (Taiwan) s
 - SRT-only, transcribe-only, and full burn-in modes.
 - Subtitle styling controls for font, size, background box, margins, and ASS alignment.
 - `ffmpeg` subtitle-filter detection before burn-in.
+- Landscape and portrait video output; displayed orientation accounts for rotation metadata. Portrait cues are limited to two 12-character lines, while landscape behavior is unchanged.
 
 The current pipeline does not include multimodal transcription, transcription prompts, keyword extraction, or timing-review stages.
 
@@ -107,6 +108,10 @@ Run `hermecho --help` for the full list.
 | `--stage-cooldown` | Delay between stages, default `60`; use `0` to disable. |
 
 Outputs are written under `output/<video_basename>/` with a `YYYYMMDD_HHMMSS` timestamp.
+
+## Hermecho Cloud rollout
+
+Before deploying Hermecho Cloud changes that accept portrait jobs, install the compatible Hermecho release on the processor Mac. The pipeline owns the portrait subtitle cue limit used by both SRT and burned-in MP4 output.
 
 ## Development
 

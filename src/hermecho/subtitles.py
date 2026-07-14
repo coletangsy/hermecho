@@ -5,6 +5,80 @@ import logging
 import math
 from typing import Dict, List
 
+PORTRAIT_SUBTITLE_LINE_LENGTH = 12
+PORTRAIT_SUBTITLE_CUE_LENGTH = PORTRAIT_SUBTITLE_LINE_LENGTH * 2
+PORTRAIT_SUBTITLE_PUNCTUATION = frozenset("，。！？；：、")
+
+
+def _split_portrait_text(text: str) -> List[str]:
+    chunks = []
+    remaining = text
+    while len(remaining) > PORTRAIT_SUBTITLE_CUE_LENGTH:
+        split_at = max(
+            (
+                index + 1
+                for index, character in enumerate(
+                    remaining[:PORTRAIT_SUBTITLE_CUE_LENGTH]
+                )
+                if character in PORTRAIT_SUBTITLE_PUNCTUATION
+            ),
+            default=PORTRAIT_SUBTITLE_CUE_LENGTH,
+        )
+        chunks.append(remaining[:split_at])
+        remaining = remaining[split_at:].lstrip()
+    if remaining:
+        chunks.append(remaining)
+    return chunks
+
+
+def _format_portrait_cue(text: str) -> str:
+    if len(text) <= PORTRAIT_SUBTITLE_LINE_LENGTH:
+        return text
+    line_break = PORTRAIT_SUBTITLE_LINE_LENGTH
+    for index in range(PORTRAIT_SUBTITLE_LINE_LENGTH - 1, -1, -1):
+        if (
+            text[index] in PORTRAIT_SUBTITLE_PUNCTUATION
+            and len(text) - index - 1 <= PORTRAIT_SUBTITLE_LINE_LENGTH
+        ):
+            line_break = index + 1
+            break
+    return f"{text[:line_break]}\n{text[line_break:]}"
+
+
+def limit_portrait_subtitle_lines(segments: List[Dict]) -> List[Dict]:
+    """Split portrait subtitle cues into at most two twelve-character lines."""
+    limited_segments = []
+    for segment in segments:
+        raw_text = segment.get("text", "")
+        if not isinstance(raw_text, str):
+            limited_segments.append(segment.copy())
+            continue
+        chunks = _split_portrait_text(" ".join(raw_text.split()))
+        if not chunks:
+            limited_segments.append(segment.copy())
+            continue
+
+        start = float(segment["start"])
+        end = float(segment["end"])
+        total_characters = sum(len(chunk) for chunk in chunks)
+        character_offset = 0
+        for index, chunk in enumerate(chunks):
+            cue_start = start + (character_offset / total_characters) * (end - start)
+            character_offset += len(chunk)
+            cue_end = (
+                end
+                if index == len(chunks) - 1
+                else start + (character_offset / total_characters) * (end - start)
+            )
+            cue = segment.copy()
+            cue.update(
+                text=_format_portrait_cue(chunk),
+                start=cue_start,
+                end=cue_end,
+            )
+            limited_segments.append(cue)
+    return limited_segments
+
 
 def _split_no_words(seg: Dict, max_chars: int, max_duration: float) -> List[Dict]:
     """

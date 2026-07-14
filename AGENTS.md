@@ -48,6 +48,7 @@ Normal transcription auto-detects the source language from the first 30 seconds 
 - Before pushing or merging a branch, inspect the branch-only changes against the base branch.
 - Update `README.md` before push or merge when changes affect user-facing behavior, setup, commands, dependencies, examples, documented workflow, or user-facing output.
 - Leave `README.md` unchanged only after confirming the branch has no documentation-impacting changes.
+- For a Hermecho Cloud portrait rollout, install the compatible Hermecho release on the processor Mac before deploying Cloud; the pipeline owns the portrait subtitle cue limit.
 
 ## Commit & Pull Request Guidelines
 - Prefer concise, imperative commit subjects (e.g., `Add stage cooldown between API-heavy steps`).
