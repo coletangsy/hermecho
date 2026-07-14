@@ -1,6 +1,7 @@
 """
 This module contains functions for video and audio processing.
 """
+import json
 import os
 import subprocess
 import threading
@@ -87,6 +88,48 @@ def _video_duration_seconds(video_path: str) -> Optional[float]:
         return float(out.stdout.strip())
     except (FileNotFoundError, subprocess.CalledProcessError, ValueError):
         return None
+
+
+def is_portrait_video(video_path: str) -> bool:
+    """Return whether a video's displayed dimensions are portrait."""
+    command = [
+        "ffprobe",
+        "-v",
+        "error",
+        "-select_streams",
+        "v:0",
+        "-show_entries",
+        "stream=width,height:stream_tags=rotate:stream_side_data=rotation",
+        "-of",
+        "json",
+        video_path,
+    ]
+    try:
+        result = subprocess.run(command, capture_output=True, text=True, timeout=30)
+    except (FileNotFoundError, subprocess.TimeoutExpired) as error:
+        raise RuntimeError("Could not determine video orientation") from error
+    if result.returncode != 0:
+        raise RuntimeError("Could not determine video orientation")
+
+    try:
+        stream = json.loads(result.stdout)["streams"][0]
+        width = int(stream["width"])
+        height = int(stream["height"])
+        rotation = 0
+        tags = stream.get("tags")
+        if isinstance(tags, dict):
+            rotation = int(float(tags.get("rotate", 0))) % 360
+        side_data_list = stream.get("side_data_list")
+        for side_data in side_data_list if isinstance(side_data_list, list) else []:
+            if isinstance(side_data, dict) and "rotation" in side_data:
+                rotation = int(float(side_data["rotation"])) % 360
+                break
+    except (IndexError, KeyError, TypeError, ValueError, json.JSONDecodeError) as error:
+        raise RuntimeError("Could not determine video orientation") from error
+
+    if rotation in {90, 270}:
+        width, height = height, width
+    return height > width
 
 
 def extract_audio(video_path: str) -> Optional[str]:

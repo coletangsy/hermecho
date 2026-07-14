@@ -126,6 +126,30 @@ class TestOpenRouterTranslation(unittest.TestCase):
             events,
         )
 
+    def test_translate_segments_preserves_punctuation_only_when_requested(self) -> None:
+        segments = [{"start": 0.0, "end": 1.0, "text": "hello"}]
+
+        with patch(
+            "hermecho.translation._translate_chunk",
+            return_value=(["你好，世界。"], None),
+        ):
+            portrait = translate_segments(
+                segments,
+                target_language="Traditional Chinese (Taiwan)",
+                translation_model="test-model",
+                reference_material=None,
+                preserve_punctuation=True,
+            )
+            landscape = translate_segments(
+                segments,
+                target_language="Traditional Chinese (Taiwan)",
+                translation_model="test-model",
+                reference_material=None,
+            )
+
+        self.assertEqual(portrait[0]["text"], "你好，世界。")
+        self.assertEqual(landscape[0]["text"], "你好 世界")
+
 
 if __name__ == "__main__":
     unittest.main()

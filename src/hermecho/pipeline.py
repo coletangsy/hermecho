@@ -14,12 +14,13 @@ from .subtitles import (
     adjust_subtitle_timing,
     fill_transcription_gaps,
     generate_srt,
+    limit_portrait_subtitle_lines,
     split_long_segments,
 )
 from .transcription import transcribe_audio
 from .translation import translate_segments
 from .utils import _print_segments, load_reference_material
-from .video_processing import burn_subtitles_into_video, extract_audio
+from .video_processing import burn_subtitles_into_video, extract_audio, is_portrait_video
 
 
 @dataclass
@@ -140,6 +141,7 @@ def process_video(config: PipelineConfig) -> None:
             emit_progress("completion", "complete", "Hermecho pipeline completed", pct=100)
             return
 
+        is_portrait = is_portrait_video(video_path)
         reference_material = load_reference_material(config.reference_file)
 
         if config.save_source_transcript:
@@ -168,6 +170,7 @@ def process_video(config: PipelineConfig) -> None:
             target_language=config.target_language,
             translation_model=config.translation_model,
             reference_material=reference_material,
+            preserve_punctuation=is_portrait,
         )
 
         if translated_segments:
@@ -191,6 +194,10 @@ def process_video(config: PipelineConfig) -> None:
                 translated_segments,
                 config.time_buffer,
             )
+            if is_portrait:
+                final_subtitle_segments = limit_portrait_subtitle_lines(
+                    final_subtitle_segments
+                )
             emit_progress(
                 "subtitle_timing_adjustment",
                 "complete",
