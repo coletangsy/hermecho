@@ -6,7 +6,7 @@
 - Pipeline orchestration lives in `src/hermecho/pipeline.py`.
 - Pipeline modules: `transcription.py`, `translation.py`, `subtitles.py`, and `video_processing.py`.
 - Translation uses OpenRouter through the OpenAI-compatible `openai` package. The former Gemini SDK helper was removed; do not add new runtime dependencies on `gemini_sdk.py`.
-- Shared helpers live in `prompts.py`, `progress.py`, `retry.py`, and `utils.py`.
+- Shared helpers live in `prompts.py`, `progress.py`, and `utils.py`.
 - Tests live in `tests/` (notably `test_main_cli.py`, `test_transcription.py`, `test_translation.py`, and `test_video_processing.py`).
 - Runtime folders: `input/` for source media, `output/` for generated artifacts, and `references/` for glossary/context files.
 - Local design notes and implementation plans may live under `docs/`, but `docs/` is ignored and not tracked in Git. Put durable setup, workflow, or operational guidance in `README.md` or `AGENTS.md`.
