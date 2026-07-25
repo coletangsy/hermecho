@@ -63,7 +63,6 @@ flowchart LR
 | `src/hermecho/subtitles.py` | Splits long segments, fills transcription gaps, adjusts subtitle timing, and writes SRT files (`src/hermecho/subtitles.py:67-214`). |
 | `src/hermecho/video_processing.py` | Extracts MP3 audio from video, checks `ffmpeg` subtitle support, builds subtitle style filters, and burns subtitles into MP4 (`src/hermecho/video_processing.py:19-39`, `src/hermecho/video_processing.py:90-220`). |
 | `src/hermecho/gemini_sdk.py` | Lazily imports `google-genai` and raises a helpful install error (`src/hermecho/gemini_sdk.py:10-24`). |
-| `src/hermecho/retry.py` | Centralized exponential backoff and transient retry helpers (`src/hermecho/retry.py:19-56`). |
 | `src/hermecho/utils.py` | Loads reference files and prints debug segment lists (`src/hermecho/utils.py:8-41`). |
 
 ## Repository Structure
@@ -87,7 +86,6 @@ hermecho/
 │       ├── subtitles.py
 │       ├── video_processing.py
 │       ├── gemini_sdk.py
-│       ├── retry.py
 │       └── utils.py
 ├── tests/
 │   ├── conftest.py
@@ -311,7 +309,7 @@ conda run -n hermecho python -m pytest tests/ -q
 | Tune Gemini translation behavior | `src/hermecho/translation.py` and `src/hermecho/prompts.py` | Translation request, parsing, chunking, and prompt rules live there. |
 | Change subtitle splitting/gap/timing/SRT formatting | `src/hermecho/subtitles.py` | Owns segment cleanup and SRT generation. |
 | Change burn-in styling or ffmpeg behavior | `src/hermecho/video_processing.py` | Owns filter construction, capability checks, and ffmpeg commands. |
-| Add retry policy shared by more API calls | `src/hermecho/retry.py` | Central place for backoff behavior. |
+| Change translation retry policy | `src/hermecho/translation.py` | The sole OpenRouter caller owns its retry behavior. |
 | Add/update architecture tests | `tests/test_main_cli.py`, `tests/test_transcription.py`, `tests/test_video_processing.py` | Existing tests are organized by boundary. |
 
 ## Operational Notes
@@ -331,7 +329,7 @@ flowchart TB
     Interface["Interface layer<br/>cli.py / src/main.py"]
     Orchestration["Orchestration layer<br/>pipeline.py / PipelineConfig"]
     StageModules["Stage modules<br/>video_processing.py<br/>transcription.py<br/>subtitles.py<br/>translation.py"]
-    Support["Support modules<br/>prompts.py<br/>gemini_sdk.py<br/>retry.py<br/>utils.py"]
+    Support["Support modules<br/>prompts.py<br/>gemini_sdk.py<br/>utils.py"]
 
     Interface --> Orchestration --> StageModules --> Support
 ```

@@ -3,6 +3,7 @@ This module contains functions for translating text using OpenRouter.
 """
 import json
 import os
+import random
 import time
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -10,7 +11,6 @@ from tqdm import tqdm
 
 from .progress import emit_progress
 from .prompts import build_translation_prompt
-from .retry import compute_backoff
 
 
 # Constants for the sliding window approach
@@ -28,6 +28,11 @@ OPENROUTER_PROVIDER_ROUTING = {
     "allow_fallbacks": True,
     "require_parameters": True,
 }
+
+
+def _translation_retry_delay(attempt: int) -> float:
+    delay = min(2.5 * (2 ** attempt), 120.0)
+    return max(0.0, delay * (1.0 + random.uniform(-0.25, 0.25)))
 
 
 def _make_openrouter_client() -> Any:
@@ -215,7 +220,7 @@ def _translate_chunk(
 
     for attempt in range(_MAX_TRANSLATION_ATTEMPTS):
         if attempt > 0:
-            delay = compute_backoff(attempt - 1)
+            delay = _translation_retry_delay(attempt - 1)
             print(
                 f"Translation: attempt {attempt + 1}/{_MAX_TRANSLATION_ATTEMPTS} "
                 f"retrying in {delay:.1f}s..."

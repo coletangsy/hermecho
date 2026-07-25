@@ -126,6 +126,43 @@ class TestOpenRouterTranslation(unittest.TestCase):
             events,
         )
 
+    def test_translate_segments_retries_single_batch_before_fallback(self) -> None:
+        response = MagicMock()
+        response.choices = [
+            types.SimpleNamespace(
+                message=types.SimpleNamespace(
+                    content=json.dumps({"translations": {"0": "你好，世界。"}})
+                )
+            )
+        ]
+        response.usage = None
+        client = MagicMock()
+        client.chat.completions.create.side_effect = [
+            RuntimeError("temporary failure"),
+            RuntimeError("temporary failure"),
+            RuntimeError("temporary failure"),
+            response,
+        ]
+        openai_module = types.SimpleNamespace(OpenAI=MagicMock(return_value=client))
+
+        with patch.dict(os.environ, {"OPENROUTER_API_KEY": "test-key"}, clear=True), \
+            patch.dict(sys.modules, {"openai": openai_module}), \
+            patch("hermecho.translation.time.sleep") as sleep, \
+            patch("random.uniform", return_value=0.0):
+            translated = translate_segments(
+                [{"start": 0.0, "end": 1.0, "text": "hello"}],
+                target_language="Traditional Chinese (Taiwan)",
+                translation_model="test-model",
+                reference_material=None,
+            )
+
+        self.assertEqual(client.chat.completions.create.call_count, 4)
+        self.assertEqual(sleep.call_args_list, [
+            unittest.mock.call(2.5),
+            unittest.mock.call(5.0),
+        ])
+        self.assertEqual(translated[0]["text"], "你好 世界")
+
     def test_translate_segments_preserves_punctuation_only_when_requested(self) -> None:
         segments = [{"start": 0.0, "end": 1.0, "text": "hello"}]
 
