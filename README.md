@@ -103,7 +103,7 @@ Run `hermecho --help` for the full list.
 | `--transcribe-only` | Write source-language SRT and stop. |
 | `--srt-only` | Write translated SRT and skip video burn-in. |
 | `--save-source-transcript` | Also write source-language SRT during a translated run. |
-| `--font_name`, `--font_size`, `--outline_width`, `--box_background` | Burn-in subtitle styling. |
+| `--font_name`, `--font_size`, `--outline_width`, `--box_background` | Burn-in subtitle styling. Font defaults to `Heiti TC`. |
 | `--margin_v`, `--margin_h`, `--alignment` | Burn-in subtitle placement. |
 | `--stage-cooldown` | Delay between stages, default `60`; use `0` to disable. |
 

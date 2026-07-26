@@ -49,6 +49,7 @@ class TestCliArguments(unittest.TestCase):
         self.assertIsNone(config.language)
         self.assertEqual(config.target_language, "Traditional Chinese (Taiwan)")
         self.assertEqual(config.translation_model, "deepseek/deepseek-v4-pro")
+        self.assertEqual(config.font_name, "Heiti TC")
         self.assertFalse(config.transcribe_only)
         self.assertFalse(config.srt_only)
         self.assertTrue(config.box_background)
@@ -161,7 +162,7 @@ class TestPipelineOrchestration(unittest.TestCase):
         self.assertEqual(
             burn_kwargs,
             {
-                "font_name": "PingFang TC",
+                "font_name": "Heiti TC",
                 "font_size": 12,
                 "outline_width": 0,
                 "use_box_background": True,

@@ -38,7 +38,7 @@ class PipelineConfig:
     output_dir: str = "output"
     reference_file: str = "references/tripleS.md"
     temperature: float = 0.0
-    font_name: str = "PingFang TC"
+    font_name: str = "Heiti TC"
     font_size: int = 12
     outline_width: int = 0
     box_background: bool = True
