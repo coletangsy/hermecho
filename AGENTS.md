@@ -21,6 +21,7 @@
 
 `ffmpeg` must be installed and available on PATH.
 Normal transcription auto-detects the source language from the first 30 seconds by default; pass `--language` to force a specific language.
+On macOS, use the default `Heiti TC` font for burn-in; `PingFang TC` may render Chinese glyphs as replacement boxes through FFmpeg/libass.
 
 ## Coding Style & Naming Conventions
 - Language: Python 3.11+.
