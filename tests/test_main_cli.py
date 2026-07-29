@@ -54,6 +54,13 @@ class TestCliArguments(unittest.TestCase):
         self.assertFalse(config.srt_only)
         self.assertTrue(config.box_background)
 
+    def test_parse_args_preserves_fonts_dir(self) -> None:
+        config = cli.config_from_args(
+            cli.parse_args(["clip.mp4", "--fonts-dir", "/tmp/pingfang"])
+        )
+
+        self.assertEqual(config.fonts_dir, "/tmp/pingfang")
+
     def test_compatibility_wrapper_delegates_to_package_cli(self) -> None:
         root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
         wrapper_path = os.path.join(root, "src", "main.py")
@@ -81,6 +88,7 @@ class TestPipelineOrchestration(unittest.TestCase):
             input_dir="input",
             output_dir=output_dir,
             language="ko",
+            fonts_dir="/tmp/pingfang",
             stage_cooldown=0,
         )
         translated = [
@@ -163,6 +171,7 @@ class TestPipelineOrchestration(unittest.TestCase):
             burn_kwargs,
             {
                 "font_name": "Heiti TC",
+                "fonts_dir": "/tmp/pingfang",
                 "font_size": 12,
                 "outline_width": 0,
                 "use_box_background": True,
