@@ -57,7 +57,11 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser.add_argument("--reference_file", default="references/tripleS.md", help="Optional path to a reference file.")
     parser.add_argument("--temperature", type=float, default=0.0, help="Whisper sampling temperature.")
     parser.add_argument("--font_name", default="Heiti TC", help="Font name for subtitles.")
-    parser.add_argument("--fonts-dir", default=None, help="Directory containing fonts for FFmpeg subtitle rendering.")
+    parser.add_argument(
+        "--fonts-dir",
+        default="/System/Library/AssetsV2/com_apple_MobileAsset_Font8/86ba2c91f017a3749571a82f2c6d890ac7ffb2fb.asset/AssetData",
+        help="Directory containing fonts for FFmpeg subtitle rendering.",
+    )
     parser.add_argument("--font_size", type=int, default=12, help="Font size for subtitles.")
     parser.add_argument("--outline_width", type=int, default=0, help="Subtitle outline width.")
     parser.add_argument(

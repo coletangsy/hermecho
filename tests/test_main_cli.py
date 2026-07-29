@@ -50,6 +50,10 @@ class TestCliArguments(unittest.TestCase):
         self.assertEqual(config.target_language, "Traditional Chinese (Taiwan)")
         self.assertEqual(config.translation_model, "deepseek/deepseek-v4-pro")
         self.assertEqual(config.font_name, "Heiti TC")
+        self.assertEqual(
+            config.fonts_dir,
+            "/System/Library/AssetsV2/com_apple_MobileAsset_Font8/86ba2c91f017a3749571a82f2c6d890ac7ffb2fb.asset/AssetData",
+        )
         self.assertFalse(config.transcribe_only)
         self.assertFalse(config.srt_only)
         self.assertTrue(config.box_background)
