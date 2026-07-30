@@ -40,6 +40,15 @@ class TestSubtitleFilterConstruction(unittest.TestCase):
         self.assertIn("/tmp/a\\:b\\'s.srt", flt)
         self.assertIn(":force_style='", flt)
 
+    def test_build_subtitles_filter_uses_fonts_dir(self) -> None:
+        flt = _build_subtitles_filter(
+            srt_path="/tmp/subtitles.srt",
+            style_options="FontName=PingFang TC",
+            fonts_dir="/tmp/Ping:Fang's",
+        )
+
+        self.assertIn(":fontsdir='/tmp/Ping\\:Fang\\'s'", flt)
+
 
 class TestFfmpegCapabilityDetection(unittest.TestCase):
 
@@ -93,7 +102,11 @@ class TestSubtitleBurnProgress(unittest.TestCase):
             "/tmp/in.mp4",
             "/tmp/subs.srt",
             "/tmp/out.mp4",
+            fonts_dir="/tmp/pingfang",
         )
+
+        command = mock_popen.call_args.args[0]
+        self.assertIn("fontsdir='/tmp/pingfang'", command[command.index("-vf") + 1])
 
         progress_lines = [
             call.args[0]

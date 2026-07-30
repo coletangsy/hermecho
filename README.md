@@ -104,6 +104,7 @@ Run `hermecho --help` for the full list.
 | `--srt-only` | Write translated SRT and skip video burn-in. |
 | `--save-source-transcript` | Also write source-language SRT during a translated run. |
 | `--font_name`, `--font_size`, `--outline_width`, `--box_background` | Burn-in subtitle styling. Font defaults to `Heiti TC`. |
+| `--fonts-dir` | Font directory for FFmpeg; defaults to the macOS MobileAsset font directory. |
 | `--margin_v`, `--margin_h`, `--alignment` | Burn-in subtitle placement. |
 | `--stage-cooldown` | Delay between stages, default `60`; use `0` to disable. |
 

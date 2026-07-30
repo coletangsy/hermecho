@@ -67,13 +67,17 @@ def _build_subtitle_style_options(
     )
 
 
-def _build_subtitles_filter(srt_path: str, style_options: str) -> str:
+def _build_subtitles_filter(
+    srt_path: str,
+    style_options: str,
+    fonts_dir: Optional[str] = None,
+) -> str:
     escaped_srt_path = _escape_filter_value(srt_path)
     escaped_style_options = _escape_filter_value(style_options)
-    return (
-        f"subtitles=filename='{escaped_srt_path}'"
-        f":force_style='{escaped_style_options}'"
-    )
+    fonts_dir_option = ""
+    if fonts_dir:
+        fonts_dir_option = f":fontsdir='{_escape_filter_value(fonts_dir)}'"
+    return f"subtitles=filename='{escaped_srt_path}'{fonts_dir_option}:force_style='{escaped_style_options}'"
 
 
 def _video_duration_seconds(video_path: str) -> Optional[float]:
@@ -187,6 +191,7 @@ def burn_subtitles_into_video(
     srt_path: str,
     output_video_path: str,
     font_name: str = "Helvetica",
+    fonts_dir: Optional[str] = None,
     font_size: int = 24,
     outline_width: int = 0,
     use_box_background: bool = False,
@@ -202,6 +207,7 @@ def burn_subtitles_into_video(
         srt_path: Path to the SRT subtitle file.
         output_video_path: Path for the new video with subtitles.
         font_name: The font to use for subtitles.
+        fonts_dir: Directory containing fonts for FFmpeg subtitle rendering.
         font_size: The font size for subtitles.
         outline_width: The width of the text outline (0 for no outline).
         use_box_background: Whether to use a black box background for subtitles.
@@ -248,7 +254,11 @@ def burn_subtitles_into_video(
         margin_h=margin_h,
         alignment=alignment,
     )
-    subtitles_filter = _build_subtitles_filter(srt_path=srt_path, style_options=style_options)
+    subtitles_filter = _build_subtitles_filter(
+        srt_path=srt_path,
+        style_options=style_options,
+        fonts_dir=fonts_dir,
+    )
 
     duration = _video_duration_seconds(video_path)
 

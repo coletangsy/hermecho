@@ -39,6 +39,7 @@ class PipelineConfig:
     reference_file: str = "references/tripleS.md"
     temperature: float = 0.0
     font_name: str = "Heiti TC"
+    fonts_dir: Optional[str] = None
     font_size: int = 12
     outline_width: int = 0
     box_background: bool = True
@@ -234,6 +235,7 @@ def process_video(config: PipelineConfig) -> None:
                     os.path.abspath(srt_path),
                     os.path.abspath(output_video_path),
                     font_name=config.font_name,
+                    fonts_dir=config.fonts_dir,
                     font_size=config.font_size,
                     outline_width=config.outline_width,
                     use_box_background=config.box_background,

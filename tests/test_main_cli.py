@@ -50,9 +50,20 @@ class TestCliArguments(unittest.TestCase):
         self.assertEqual(config.target_language, "Traditional Chinese (Taiwan)")
         self.assertEqual(config.translation_model, "deepseek/deepseek-v4-pro")
         self.assertEqual(config.font_name, "Heiti TC")
+        self.assertEqual(
+            config.fonts_dir,
+            "/System/Library/AssetsV2/com_apple_MobileAsset_Font8/86ba2c91f017a3749571a82f2c6d890ac7ffb2fb.asset/AssetData",
+        )
         self.assertFalse(config.transcribe_only)
         self.assertFalse(config.srt_only)
         self.assertTrue(config.box_background)
+
+    def test_parse_args_preserves_fonts_dir(self) -> None:
+        config = cli.config_from_args(
+            cli.parse_args(["clip.mp4", "--fonts-dir", "/tmp/pingfang"])
+        )
+
+        self.assertEqual(config.fonts_dir, "/tmp/pingfang")
 
     def test_compatibility_wrapper_delegates_to_package_cli(self) -> None:
         root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
@@ -81,6 +92,7 @@ class TestPipelineOrchestration(unittest.TestCase):
             input_dir="input",
             output_dir=output_dir,
             language="ko",
+            fonts_dir="/tmp/pingfang",
             stage_cooldown=0,
         )
         translated = [
@@ -163,6 +175,7 @@ class TestPipelineOrchestration(unittest.TestCase):
             burn_kwargs,
             {
                 "font_name": "Heiti TC",
+                "fonts_dir": "/tmp/pingfang",
                 "font_size": 12,
                 "outline_width": 0,
                 "use_box_background": True,
