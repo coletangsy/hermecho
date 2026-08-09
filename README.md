@@ -11,7 +11,7 @@ Hermecho translates videos with Korean audio into Traditional Chinese (Taiwan) s
 - SRT-only, transcribe-only, and full burn-in modes.
 - Subtitle styling controls for font, size, background box, margins, and ASS alignment.
 - `ffmpeg` subtitle-filter detection before burn-in.
-- Landscape and portrait video output; displayed orientation accounts for rotation metadata. Portrait cues are limited to two 12-character lines, while landscape behavior is unchanged.
+- Deterministic portrait and landscape Delivery Profiles measure subtitle width in Visual Cells and wrap to at most two lines. Every translated run writes a Delivery Gate report; presentation limits use Best-effort Delivery, while structural timing defects block final output.
 
 The current pipeline does not include multimodal transcription, transcription prompts, keyword extraction, or timing-review stages.
 
@@ -129,11 +129,11 @@ Run `hermecho --help` for the full list.
 | `--margin_v`, `--margin_h`, `--alignment` | Burn-in subtitle placement. |
 | `--stage-cooldown` | Delay between stages, default `60`; use `0` to disable. |
 
-Outputs are written under `output/<video_basename>/` with a `YYYYMMDD_HHMMSS` timestamp.
+Outputs are written under `output/<video_basename>/` with a `YYYYMMDD_HHMMSS` timestamp. Translated runs also write a matching `*_delivery_gate.txt` report with any presentation warnings, Repair Limits, or Structural Defects.
 
 ## Hermecho Cloud rollout
 
-Before deploying Hermecho Cloud changes that accept portrait jobs, install the compatible Hermecho release on the processor Mac. The pipeline owns the portrait subtitle cue limit used by both SRT and burned-in MP4 output.
+Before deploying Hermecho Cloud changes that accept portrait jobs, install the compatible Hermecho release on the processor Mac. The pipeline owns the orientation-specific Delivery Profile used by both SRT and burned-in MP4 output.
 
 ## Development
 

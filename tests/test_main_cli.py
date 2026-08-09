@@ -336,7 +336,7 @@ class TestPipelineOrchestration(unittest.TestCase):
             self.assertIn(expected_error, messages)
             self.assertIn('"stage": "transcription", "status": "error"', messages)
 
-    def test_portrait_pipeline_limits_cues_and_uses_them_for_both_outputs(self) -> None:
+    def test_portrait_pipeline_applies_delivery_profile_to_both_outputs(self) -> None:
         with tempfile.NamedTemporaryFile(suffix=".mp3", delete=False) as tmp:
             audio_path = tmp.name
             tmp.write(b"fake")
@@ -397,25 +397,25 @@ class TestPipelineOrchestration(unittest.TestCase):
             self.assertEqual(
                 srt.read(),
                 """1
-00:00:00,000 --> 00:00:01,037
-這是前段字幕，
+00:00:00,000 --> 00:00:04,000
+這是前段字幕，這是後段需要
+以字數分割的直式影片文字內容
 
 2
-00:00:01,037 --> 00:00:04,000
-這是後段需要以字數分割的
-直式影片文字內容
-
-3
-00:00:04,000 --> 00:00:08,800
-甲乙丙丁戊己庚辛壬癸子丑
-寅卯辰巳午未申酉戌亥天地
-
-4
-00:00:08,800 --> 00:00:10,000
-玄黃宇宙洪荒
+00:00:04,000 --> 00:00:10,000
+甲乙丙丁戊己庚辛壬癸子丑寅卯辰
+巳午未申酉戌亥天地玄黃宇宙洪荒
 
 """,
             )
+        report_path = next(
+            os.path.join(root, name)
+            for root, _, files in os.walk(output_dir)
+            for name in files
+            if name.endswith("_delivery_gate.txt")
+        )
+        with open(report_path, encoding="utf-8") as report:
+            self.assertIn("Repair Limits: 6", report.read())
         burn.assert_called_once()
         burn_args, burn_kwargs = burn.call_args
         self.assertEqual(
@@ -470,14 +470,14 @@ class TestPipelineOrchestration(unittest.TestCase):
             stage_cooldown=0,
         )
         transcribed = [{"start": 0.0, "end": 1.0, "text": "hello"}]
-        translated = [{"start": 0.0, "end": 1.0, "text": "你好"}]
-        adjusted = [{"start": 0.0, "end": 1.2, "text": "你好"}]
+        translated = [{"start": 0.0, "end": 1.0, "text": "你好，世界。"}]
+        adjusted = [{"start": 0.0, "end": 1.2, "text": "你好，世界。"}]
 
         try:
             config = PipelineConfig(**vars(args))
             with patch("hermecho.pipeline.extract_audio", return_value=audio_path), \
                 patch("hermecho.pipeline.transcribe_audio", return_value=transcribed) as transcribe, \
-                patch("hermecho.pipeline.translate_segments", return_value=translated), \
+                patch("hermecho.pipeline.translate_segments", return_value=translated) as translate, \
                 patch("hermecho.pipeline.adjust_subtitle_timing", return_value=adjusted) as adjust, \
                 patch("hermecho.pipeline.generate_srt") as generate_srt, \
                 patch("hermecho.pipeline.is_portrait_video", return_value=False), \
@@ -500,6 +500,8 @@ class TestPipelineOrchestration(unittest.TestCase):
             silence_boundaries=[],
         )
         generate_srt.assert_called_once_with(adjusted, generate_srt.call_args.args[1])
+        self.assertTrue(translate.call_args.kwargs["preserve_punctuation"])
+        self.assertEqual(generate_srt.call_args.args[0][0]["text"], "你好，世界。")
 
     @patch.dict(sys.modules, {"timing_review": None})
     def test_full_pipeline_does_not_import_or_call_timing_review(self) -> None:

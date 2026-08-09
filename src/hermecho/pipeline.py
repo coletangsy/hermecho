@@ -12,9 +12,11 @@ from tqdm import trange
 from .progress import emit_progress
 from .subtitles import (
     adjust_subtitle_timing,
+    apply_delivery_profile,
+    delivery_gate_report,
+    delivery_profile_for_orientation,
     fill_transcription_gaps,
     generate_srt,
-    limit_portrait_subtitle_lines,
     split_long_segments,
 )
 from .transcription import transcribe_audio, validate_mlx_backend
@@ -225,10 +227,37 @@ def process_video(config: PipelineConfig) -> None:
                 config.time_buffer,
                 silence_boundaries=silence_boundaries,
             )
-            if is_portrait:
-                final_subtitle_segments = limit_portrait_subtitle_lines(
-                    final_subtitle_segments
+            profile = delivery_profile_for_orientation(is_portrait)
+            emit_progress(
+                "delivery_gate",
+                "running",
+                f"Applying {profile.name} Delivery Profile",
+            )
+            delivery_result = apply_delivery_profile(final_subtitle_segments, profile)
+            report_path = os.path.join(
+                output_dir,
+                f"{video_name}_{timestamp}_delivery_gate.txt",
+            )
+            report = delivery_gate_report(delivery_result, profile)
+            with open(report_path, "w", encoding="utf-8") as report_file:
+                report_file.write(report + "\n")
+            print(report)
+            if delivery_result.blocked:
+                print("Delivery Gate blocked final delivery; see report for details.")
+                emit_progress(
+                    "delivery_gate",
+                    "error",
+                    "Delivery Gate found Structural Defects",
+                    detail=report_path,
                 )
+                return
+            final_subtitle_segments = delivery_result.cues
+            emit_progress(
+                "delivery_gate",
+                "complete",
+                "Delivery Gate completed",
+                detail=report_path,
+            )
             emit_progress(
                 "subtitle_timing_adjustment",
                 "complete",
