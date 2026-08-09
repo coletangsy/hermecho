@@ -19,7 +19,7 @@ from .subtitles import (
 )
 from .transcription import transcribe_audio
 from .translation import translate_segments
-from .utils import _print_segments, load_reference_material
+from .utils import _print_segments, load_locked_terms, load_reference_material
 from .video_processing import burn_subtitles_into_video, extract_audio, is_portrait_video
 
 
@@ -37,6 +37,7 @@ class PipelineConfig:
     input_dir: str = "input"
     output_dir: str = "output"
     reference_file: str = "references/tripleS.md"
+    locked_terms_file: str = "references/locked_terms.json"
     temperature: float = 0.0
     font_name: str = "Heiti TC"
     fonts_dir: Optional[str] = None
@@ -119,6 +120,16 @@ def process_video(config: PipelineConfig) -> None:
         _print_segments("Transcription after Splitting", transcribed_segments)
 
         transcribed_segments = fill_transcription_gaps(transcribed_segments)
+        silence_boundaries = [
+            float(segment["start"])
+            for segment in transcribed_segments
+            if segment.get("text", "").strip() == "[no speech]"
+        ]
+        transcribed_segments = [
+            segment
+            for segment in transcribed_segments
+            if segment.get("text", "").strip() != "[no speech]"
+        ]
         _print_segments("Transcription after Gap-Filling", transcribed_segments)
 
         video_name = os.path.splitext(config.video_filename)[0]
@@ -144,6 +155,14 @@ def process_video(config: PipelineConfig) -> None:
 
         is_portrait = is_portrait_video(video_path)
         reference_material = load_reference_material(config.reference_file)
+        locked_terms = load_locked_terms(config.locked_terms_file)
+        if locked_terms is None:
+            emit_progress(
+                "translation_gate",
+                "error",
+                "Locked Terms configuration is invalid",
+            )
+            return
 
         if config.save_source_transcript:
             source_srt = os.path.join(
@@ -171,10 +190,11 @@ def process_video(config: PipelineConfig) -> None:
             target_language=config.target_language,
             translation_model=config.translation_model,
             reference_material=reference_material,
-            preserve_punctuation=is_portrait,
+            locked_terms=locked_terms,
+            preserve_punctuation=True,
         )
 
-        if translated_segments:
+        if translated_segments is not None:
             emit_progress(
                 "translation",
                 "complete",
@@ -194,6 +214,7 @@ def process_video(config: PipelineConfig) -> None:
             final_subtitle_segments = adjust_subtitle_timing(
                 translated_segments,
                 config.time_buffer,
+                silence_boundaries=silence_boundaries,
             )
             if is_portrait:
                 final_subtitle_segments = limit_portrait_subtitle_lines(
@@ -245,7 +266,12 @@ def process_video(config: PipelineConfig) -> None:
                 )
                 emit_progress("completion", "complete", "Hermecho pipeline completed", pct=100)
         else:
-            emit_progress("translation", "error", "Translation failed")
+            print("Translation Gate blocked final SRT/video delivery.")
+            emit_progress(
+                "translation",
+                "error",
+                "Translation Gate blocked final SRT/video delivery",
+            )
 
     finally:
         if os.path.exists(audio_path):

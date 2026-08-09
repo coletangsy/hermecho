@@ -6,6 +6,7 @@ Hermecho translates videos with Korean audio into Traditional Chinese (Taiwan) s
 
 - Local Whisper transcription with no transcription API usage.
 - OpenRouter translation with reference-file context for names and terms.
+- Translation Gate rejects incomplete model responses and enforces JSON Locked Terms.
 - Segment guardrails for long subtitles, transcription gaps, and post-translation timing buffers.
 - SRT-only, transcribe-only, and full burn-in modes.
 - Subtitle styling controls for font, size, background box, margins, and ASS alignment.
@@ -83,8 +84,16 @@ hermecho clip.mp4 --input_dir ./videos --output_dir ./exports
 The full pipeline is:
 
 ```text
-extract audio -> local Whisper transcription -> split/fill segments -> OpenRouter translation -> timing adjustment -> SRT -> optional MP4 burn-in
+extract audio -> local Whisper transcription -> split/fill segments -> OpenRouter Translation Gate -> timing adjustment -> SRT -> optional MP4 burn-in
 ```
+
+For translated runs, `--locked-terms-file` is required and defaults to
+`references/locked_terms.json`. It is a machine-readable JSON source-to-target
+mapping enforced by the Translation Gate; a missing or invalid mapping blocks
+translation and final SRT/MP4 delivery. `--reference_file` remains separate
+Markdown prompt context. Accepted translations preserve punctuation for both
+landscape and portrait delivery; portrait processing may wrap or split cues but
+does not remove accepted punctuation.
 
 ## Options
 
@@ -98,6 +107,7 @@ Run `hermecho --help` for the full list.
 | `--target_language` | Translation target, default `Traditional Chinese (Taiwan)`. |
 | `--translation_model` | OpenRouter model slug, default `deepseek/deepseek-v4-pro`. |
 | `--reference_file` | Translation reference material, default `references/tripleS.md`. |
+| `--locked-terms-file` | Required JSON source-to-target mapping for translated runs; defaults to `references/locked_terms.json`. Missing or invalid mappings block translation and final SRT/MP4 delivery. |
 | `--temperature` | Whisper sampling temperature, default `0.0`. |
 | `--time_buffer` | Seconds between subtitle cues after timing adjustment. |
 | `--transcribe-only` | Write source-language SRT and stop. |

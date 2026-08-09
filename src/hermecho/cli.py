@@ -55,6 +55,14 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser.add_argument("--input_dir", default="input", help="The directory where the input video is located.")
     parser.add_argument("--output_dir", default="output", help="The directory where the output files will be saved.")
     parser.add_argument("--reference_file", default="references/tripleS.md", help="Optional path to a reference file.")
+    parser.add_argument(
+        "--locked-terms-file",
+        default="references/locked_terms.json",
+        help=(
+            "Required JSON source-to-target Locked Terms mapping for translated runs "
+            "(default: references/locked_terms.json)."
+        ),
+    )
     parser.add_argument("--temperature", type=float, default=0.0, help="Whisper sampling temperature.")
     parser.add_argument("--font_name", default="Heiti TC", help="Font name for subtitles.")
     parser.add_argument(

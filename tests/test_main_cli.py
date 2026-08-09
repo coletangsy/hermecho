@@ -49,6 +49,7 @@ class TestCliArguments(unittest.TestCase):
         self.assertIsNone(config.language)
         self.assertEqual(config.target_language, "Traditional Chinese (Taiwan)")
         self.assertEqual(config.translation_model, "deepseek/deepseek-v4-pro")
+        self.assertEqual(config.locked_terms_file, "references/locked_terms.json")
         self.assertEqual(config.font_name, "Heiti TC")
         self.assertEqual(
             config.fonts_dir,
@@ -81,6 +82,222 @@ class TestCliArguments(unittest.TestCase):
 
 
 class TestPipelineOrchestration(unittest.TestCase):
+    def test_translation_gate_blocks_srt_and_video_after_retries(self) -> None:
+        with tempfile.NamedTemporaryFile(suffix=".mp3", delete=False) as tmp:
+            audio_path = tmp.name
+            tmp.write(b"fake")
+
+        config = PipelineConfig(
+            video_filename="clip.mp4",
+            input_dir="input",
+            output_dir=tempfile.mkdtemp(),
+            language="ko",
+            stage_cooldown=0,
+        )
+        transcribed = [{"start": 0.0, "end": 1.0, "text": "hello"}]
+
+        try:
+            with patch("hermecho.pipeline.extract_audio", return_value=audio_path), \
+                patch("hermecho.pipeline.transcribe_audio", return_value=transcribed), \
+                patch("hermecho.pipeline.is_portrait_video", return_value=False), \
+                patch("hermecho.pipeline.load_reference_material", return_value=""), \
+                patch(
+                    "hermecho.translation._translate_chunk",
+                    return_value=({"translations": {"0": "  "}}, None),
+                ) as translate_chunk, \
+                patch("hermecho.translation.time.sleep"), \
+                patch("hermecho.pipeline.generate_srt") as generate_srt, \
+                patch("hermecho.pipeline.burn_subtitles_into_video") as burn, \
+                patch("builtins.print") as mock_print:
+                cli.process_video(config)
+        finally:
+            if os.path.exists(audio_path):
+                os.unlink(audio_path)
+
+        generate_srt.assert_not_called()
+        burn.assert_not_called()
+        self.assertEqual(translate_chunk.call_count, 3)
+        messages = [str(call.args[0]) for call in mock_print.call_args_list if call.args]
+        self.assertTrue(
+            any("0" in message and "empty_translation" in message for message in messages)
+        )
+
+    def test_pipeline_excludes_no_speech_from_source_and_translation_delivery(self) -> None:
+        with tempfile.NamedTemporaryFile(suffix=".mp3", delete=False) as tmp:
+            audio_path = tmp.name
+            tmp.write(b"fake")
+
+        transcribed = [
+            {"start": 0.0, "end": 1.0, "text": "first"},
+            {"start": 7.0, "end": 8.0, "text": "second"},
+        ]
+        translated = [
+            {"start": 0.0, "end": 1.0, "text": "甲"},
+            {"start": 7.0, "end": 8.0, "text": "乙"},
+        ]
+
+        try:
+            for mode in ("transcribe_only", "save_source_transcript"):
+                with self.subTest(mode=mode):
+                    config = PipelineConfig(
+                        video_filename="clip.mp4",
+                        input_dir="input",
+                        output_dir=tempfile.mkdtemp(),
+                        transcribe_only=mode == "transcribe_only",
+                        srt_only=True,
+                        save_source_transcript=mode == "save_source_transcript",
+                        language="ko",
+                        stage_cooldown=0,
+                    )
+                    with patch("hermecho.pipeline.extract_audio", return_value=audio_path), \
+                        patch("hermecho.pipeline.transcribe_audio", return_value=transcribed), \
+                        patch("hermecho.pipeline.is_portrait_video", return_value=False), \
+                        patch("hermecho.pipeline.load_reference_material", return_value=""), \
+                        patch("hermecho.pipeline.load_locked_terms", return_value={}), \
+                        patch("hermecho.pipeline.translate_segments", return_value=translated) as translate, \
+                        patch("hermecho.pipeline.adjust_subtitle_timing", return_value=translated), \
+                        patch("hermecho.pipeline.generate_srt") as generate_srt:
+                        cli.process_video(config)
+
+                    for call in generate_srt.call_args_list:
+                        self.assertNotIn(
+                            "[no speech]",
+                            [segment["text"] for segment in call.args[0]],
+                        )
+                    if mode == "save_source_transcript":
+                        self.assertNotIn(
+                            "[no speech]",
+                            [segment["text"] for segment in translate.call_args.args[0]],
+                        )
+        finally:
+            if os.path.exists(audio_path):
+                os.unlink(audio_path)
+
+    def test_pipeline_keeps_silence_boundary_for_subtitle_timing(self) -> None:
+        with tempfile.NamedTemporaryFile(suffix=".mp3", delete=False) as tmp:
+            audio_path = tmp.name
+            tmp.write(b"fake")
+
+        transcribed = [
+            {"start": 0.0, "end": 1.0, "text": "first"},
+            {"start": 7.0, "end": 8.0, "text": "second"},
+        ]
+        translated = [
+            {"start": 0.0, "end": 1.0, "text": "甲"},
+            {"start": 7.0, "end": 8.0, "text": "乙"},
+        ]
+        config = PipelineConfig(
+            video_filename="clip.mp4",
+            input_dir="input",
+            output_dir=tempfile.mkdtemp(),
+            language="ko",
+            srt_only=True,
+            stage_cooldown=0,
+        )
+
+        try:
+            with patch("hermecho.pipeline.extract_audio", return_value=audio_path), \
+                patch("hermecho.pipeline.transcribe_audio", return_value=transcribed), \
+                patch("hermecho.pipeline.is_portrait_video", return_value=False), \
+                patch("hermecho.pipeline.load_reference_material", return_value=""), \
+                patch("hermecho.pipeline.load_locked_terms", return_value={}), \
+                patch("hermecho.pipeline.translate_segments", return_value=translated), \
+                patch("hermecho.pipeline.generate_srt") as generate_srt:
+                cli.process_video(config)
+        finally:
+            if os.path.exists(audio_path):
+                os.unlink(audio_path)
+
+        final_segments = generate_srt.call_args.args[0]
+        self.assertNotIn("[no speech]", [segment["text"] for segment in final_segments])
+        self.assertLessEqual(final_segments[0]["end"], 1.0)
+
+    def test_pipeline_blocks_missing_or_malformed_locked_terms_files(self) -> None:
+        with tempfile.NamedTemporaryFile(suffix=".mp3", delete=False) as tmp:
+            audio_path = tmp.name
+            tmp.write(b"fake")
+
+        try:
+            with tempfile.TemporaryDirectory() as temporary_dir:
+                malformed_path = os.path.join(temporary_dir, "malformed.json")
+                with open(malformed_path, "w", encoding="utf-8") as locked_terms:
+                    locked_terms.write("{")
+
+                for label, locked_terms_path in (
+                    ("missing", os.path.join(temporary_dir, "missing.json")),
+                    ("malformed", malformed_path),
+                ):
+                    with self.subTest(locked_terms=label):
+                        config = PipelineConfig(
+                            video_filename="clip.mp4",
+                            input_dir="input",
+                            output_dir=tempfile.mkdtemp(),
+                            language="ko",
+                            locked_terms_file=locked_terms_path,
+                            stage_cooldown=0,
+                        )
+                        with patch("hermecho.pipeline.extract_audio", return_value=audio_path), \
+                            patch(
+                                "hermecho.pipeline.transcribe_audio",
+                                return_value=[{"start": 0.0, "end": 1.0, "text": "hello"}],
+                            ), \
+                            patch("hermecho.pipeline.is_portrait_video", return_value=False), \
+                            patch("hermecho.pipeline.load_reference_material", return_value=""), \
+                            patch("hermecho.pipeline.translate_segments") as translate, \
+                            patch("hermecho.pipeline.generate_srt") as generate_srt, \
+                            patch("hermecho.pipeline.burn_subtitles_into_video") as burn:
+                            cli.process_video(config)
+
+                        translate.assert_not_called()
+                        generate_srt.assert_not_called()
+                        burn.assert_not_called()
+        finally:
+            if os.path.exists(audio_path):
+                os.unlink(audio_path)
+
+    def test_pipeline_blocks_invalid_utf8_locked_terms_file(self) -> None:
+        with tempfile.NamedTemporaryFile(suffix=".mp3", delete=False) as tmp:
+            audio_path = tmp.name
+            tmp.write(b"fake")
+        with tempfile.NamedTemporaryFile(suffix=".json", delete=False) as tmp:
+            locked_terms_path = tmp.name
+            tmp.write(b"\xff")
+
+        config = PipelineConfig(
+            video_filename="clip.mp4",
+            input_dir="input",
+            output_dir=tempfile.mkdtemp(),
+            language="ko",
+            locked_terms_file=locked_terms_path,
+            stage_cooldown=0,
+        )
+
+        try:
+            with patch("hermecho.pipeline.extract_audio", return_value=audio_path), \
+                patch(
+                    "hermecho.pipeline.transcribe_audio",
+                    return_value=[{"start": 0.0, "end": 1.0, "text": "hello"}],
+                ), \
+                patch("hermecho.pipeline.is_portrait_video", return_value=False), \
+                patch("hermecho.pipeline.load_reference_material", return_value=""), \
+                patch("hermecho.pipeline.translate_segments") as translate, \
+                patch("hermecho.pipeline.generate_srt") as generate_srt, \
+                patch("hermecho.pipeline.burn_subtitles_into_video") as burn, \
+                patch("builtins.print") as mock_print:
+                cli.process_video(config)
+        finally:
+            if os.path.exists(audio_path):
+                os.unlink(audio_path)
+            if os.path.exists(locked_terms_path):
+                os.unlink(locked_terms_path)
+
+        translate.assert_not_called()
+        generate_srt.assert_not_called()
+        burn.assert_not_called()
+        messages = [str(call.args[0]) for call in mock_print.call_args_list if call.args]
+        self.assertTrue(any("--locked-terms-file" in message for message in messages))
+        self.assertTrue(any("translation_gate" in message for message in messages))
+
     def test_portrait_pipeline_limits_cues_and_uses_them_for_both_outputs(self) -> None:
         with tempfile.NamedTemporaryFile(suffix=".mp3", delete=False) as tmp:
             audio_path = tmp.name
@@ -238,7 +455,11 @@ class TestPipelineOrchestration(unittest.TestCase):
             language="ko",
             temperature=0.0,
         )
-        adjust.assert_called_once_with(translated, 0.25)
+        adjust.assert_called_once_with(
+            translated,
+            0.25,
+            silence_boundaries=[],
+        )
         generate_srt.assert_called_once_with(adjusted, generate_srt.call_args.args[1])
 
     @patch.dict(sys.modules, {"timing_review": None})

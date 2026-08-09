@@ -3,7 +3,7 @@ This module contains functions for generating, adjusting, and cleaning subtitles
 """
 import logging
 import math
-from typing import Dict, List
+from typing import Dict, List, Optional
 
 PORTRAIT_SUBTITLE_LINE_LENGTH = 12
 PORTRAIT_SUBTITLE_CUE_LENGTH = PORTRAIT_SUBTITLE_LINE_LENGTH * 2
@@ -245,7 +245,11 @@ def fill_transcription_gaps(
     return filled_segments
 
 
-def adjust_subtitle_timing(segments: List[Dict], time_buffer: float) -> List[Dict]:
+def adjust_subtitle_timing(
+    segments: List[Dict],
+    time_buffer: float,
+    silence_boundaries: Optional[List[float]] = None,
+) -> List[Dict]:
     """
     Adjusts subtitle timings to fill gaps and ensures a consistent reading pace.
 
@@ -255,6 +259,7 @@ def adjust_subtitle_timing(segments: List[Dict], time_buffer: float) -> List[Dic
     Args:
         segments: A list of subtitle segments (can be transcribed or translated).
         time_buffer: The buffer time (in seconds) to maintain between subtitles.
+        silence_boundaries: Silence-start times that subtitle cues must not cross.
 
     Returns:
         The adjusted list of segments.
@@ -265,6 +270,7 @@ def adjust_subtitle_timing(segments: List[Dict], time_buffer: float) -> List[Dic
         return []
 
     adjusted_segments = [seg.copy() for seg in segments]
+    silence_boundaries = sorted(silence_boundaries or [])
 
     for i in range(len(adjusted_segments) - 1):
         current_segment = adjusted_segments[i]
@@ -272,6 +278,16 @@ def adjust_subtitle_timing(segments: List[Dict], time_buffer: float) -> List[Dic
 
         # The ideal end time for the current segment is the start of the next one minus the buffer.
         new_end_time = next_segment['start'] - time_buffer
+        silence_start = next(
+            (
+                boundary
+                for boundary in silence_boundaries
+                if current_segment['start'] < boundary < next_segment['start']
+            ),
+            None,
+        )
+        if silence_start is not None:
+            new_end_time = min(new_end_time, silence_start)
 
         # Update the end time. This extends shorter segments and shortens longer ones.
         current_segment['end'] = new_end_time

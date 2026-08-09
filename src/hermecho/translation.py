@@ -19,7 +19,7 @@ TOKEN_THRESHOLD = 128000  # Max characters to send in a single prompt
 CHUNK_SIZE = 200          # Number of segments per chunk, increased for better performance
 OVERLAP_SIZE = 3         # Number of segments to overlap
 
-_MAX_TRANSLATION_ATTEMPTS = 3
+_MAX_TRANSLATION_RETRIES = 2
 
 
 OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
@@ -28,6 +28,18 @@ OPENROUTER_PROVIDER_ROUTING = {
     "allow_fallbacks": True,
     "require_parameters": True,
 }
+
+
+class _JSONObject(dict):
+    """JSON object that retains duplicate keys for Translation Gate validation."""
+
+    def __init__(self, pairs: List[Tuple[str, Any]]) -> None:
+        super().__init__()
+        self.duplicate_keys: List[str] = []
+        for key, value in pairs:
+            if key in self:
+                self.duplicate_keys.append(key)
+            self[key] = value
 
 
 def _translation_retry_delay(attempt: int) -> float:
@@ -141,73 +153,21 @@ def _message_content_from_openai_response(response: Any) -> str:
     return content
 
 
-def _extract_translations_from_response(
-    response_json: Any,
-    expected_count: int,
-) -> Optional[List[str]]:
-    """
-    Robustly extract the translations list from a model JSON response.
-
-    Handles multiple response shapes:
-    - Dict-keyed (preferred): ``{"translations": {"0": "t1", "1": "t2", ...}}``
-      Allows partial recovery even when the model skips or merges some indices.
-    - Legacy array: ``{"translations": ["t1", "t2", ...]}`` or a bare ``[...]``
-    - Any other top-level dict key whose value is a list of the right length
-    """
-    if isinstance(response_json, list):
-        return response_json
-
-    if not isinstance(response_json, dict):
-        return None
-
-    if "translations" in response_json:
-        val = response_json["translations"]
-        if isinstance(val, dict):
-            result = [str(val.get(str(i), "")) for i in range(expected_count)]
-            return result
-        if isinstance(val, list):
-            return val
-
-    for val in response_json.values():
-        if isinstance(val, dict):
-            result = [str(val.get(str(i), "")) for i in range(expected_count)]
-            if any(v for v in result):
-                return result
-        if isinstance(val, list) and len(val) == expected_count:
-            if all(isinstance(item, str) for item in val):
-                return val
-
-    return None
-
-
 def _translate_chunk(
     chunk_segments: List[Dict],
     target_language: str,
     translation_model: str,
     reference_material: Optional[str],
     context: Dict[str, str],
-) -> Tuple[Optional[List[str]], Optional[Dict[str, Any]]]:
-    """
-    Translates a single chunk of subtitle segments using OpenRouter.
-
-    Formats the text segments as a JSON array and instructs the model to
-    return a translated JSON array, which is more robust for segment counting.
-
-    Args:
-        chunk_segments: A list of segment dictionaries to be translated.
-        target_language: The target language for translation.
-        translation_model: The OpenRouter model slug to use.
-        reference_material: Optional reference text to guide the translation.
-        context: A dictionary containing 'prev' and 'next' text for context.
-
-    Returns:
-        (translated strings, token_usage) or (None, usage) on failure.
-    """
+    locked_terms: Optional[Dict[str, str]] = None,
+) -> Tuple[Optional[Any], Optional[Dict[str, Any]]]:
+    """Request one untrusted JSON translation response for a chunk."""
     prompt_text = build_translation_prompt(
         chunk_segments=chunk_segments,
         target_language=target_language,
         reference_material=reference_material,
         context=context,
+        locked_terms=locked_terms,
     )
 
     try:
@@ -216,82 +176,207 @@ def _translate_chunk(
         print(f"Error: {exc}")
         return None, None
 
-    last_usage: Optional[Dict[str, Any]] = None
+    response_text = ""
+    usage: Optional[Dict[str, Any]] = None
+    try:
+        response = client.chat.completions.create(
+            model=translation_model,
+            messages=[{"role": "user", "content": prompt_text}],
+            temperature=0,
+            response_format={"type": "json_object"},
+            extra_body={"provider": OPENROUTER_PROVIDER_ROUTING},
+        )
+        usage = _usage_from_openai_response(response)
+        _log_translation_api_tokens("Translation API tokens", usage)
+        response_text = _message_content_from_openai_response(response)
+        return json.loads(response_text, object_pairs_hook=_JSONObject), usage
+    except json.JSONDecodeError as exc:
+        print(
+            f"Warning: Failed to decode JSON from the model's response: {exc}. "
+            f"Preview: {response_text[:200]!r}"
+        )
+        return None, usage
+    except Exception as exc:
+        print(f"An unexpected error occurred during chunk translation: {exc}")
+        return None, usage
 
-    for attempt in range(_MAX_TRANSLATION_ATTEMPTS):
-        if attempt > 0:
-            delay = _translation_retry_delay(attempt - 1)
+
+def _translation_id(segment: Dict, index: int) -> str:
+    return str(segment.get("_translation_id", index))
+
+
+def _validate_translation_response(
+    response_json: Any,
+    requested_segments: List[Dict],
+    locked_terms: Dict[str, str],
+) -> Tuple[Dict[str, str], Dict[str, List[str]]]:
+    """Accept only exact, non-empty, Locked-Term-compliant response entries."""
+    requested_by_id = {
+        _translation_id(segment, index): segment
+        for index, segment in enumerate(requested_segments)
+    }
+    requested_ids = set(requested_by_id)
+    if (
+        not isinstance(response_json, dict)
+        or set(response_json) != {"translations"}
+        or not isinstance(response_json["translations"], dict)
+    ):
+        return {}, {
+            translation_id: ["malformed_response"]
+            for translation_id in requested_by_id
+        }
+
+    duplicate_keys = getattr(response_json, "duplicate_keys", [])
+    if duplicate_keys:
+        rule = f"duplicate_key({', '.join(sorted(duplicate_keys))})"
+        return {}, {
+            translation_id: [rule]
+            for translation_id in requested_by_id
+        }
+
+    translations = response_json["translations"]
+    duplicate_ids = getattr(translations, "duplicate_keys", [])
+    if duplicate_ids:
+        rule = f"duplicate_id({', '.join(sorted(duplicate_ids))})"
+        return {}, {
+            translation_id: [rule]
+            for translation_id in requested_by_id
+        }
+
+    if any(not isinstance(translation_id, str) for translation_id in translations):
+        return {}, {
+            translation_id: ["malformed_id"]
+            for translation_id in requested_by_id
+        }
+
+    extra_ids = set(translations) - requested_ids
+    if extra_ids:
+        rule = f"unexpected_id({', '.join(sorted(extra_ids))})"
+        return {}, {
+            translation_id: [rule]
+            for translation_id in requested_by_id
+        }
+
+    accepted: Dict[str, str] = {}
+    defects: Dict[str, List[str]] = {}
+    for translation_id, source_segment in requested_by_id.items():
+        if translation_id not in translations:
+            defects[translation_id] = ["missing_id"]
+            continue
+
+        translated_text = translations[translation_id]
+        if not isinstance(translated_text, str):
+            defects[translation_id] = ["malformed_value"]
+            continue
+
+        translated_text = translated_text.strip()
+        if not translated_text:
+            defects[translation_id] = ["empty_translation"]
+            continue
+
+        source_text = source_segment.get("text", "")
+        failed_terms = [
+            f"locked_term({source})"
+            for source, target in locked_terms.items()
+            if source in source_text and target not in translated_text
+        ]
+        if failed_terms:
+            defects[translation_id] = failed_terms
+            continue
+        accepted[translation_id] = translated_text
+
+    return accepted, defects
+
+
+def _format_translation_gate_defects(defects: Dict[str, List[str]]) -> str:
+    return "; ".join(
+        f"{translation_id}: {', '.join(rules)}"
+        for translation_id, rules in sorted(defects.items())
+    )
+
+
+def _report_translation_gate_failure(defects: Dict[str, List[str]]) -> None:
+    detail = _format_translation_gate_defects(defects)
+    print(f"Translation Gate failed: {detail}")
+    emit_progress(
+        "translation_gate",
+        "error",
+        "Translation Gate failed",
+        detail=detail,
+    )
+
+
+def _context_for_retry(
+    chunk_segments: List[Dict],
+    context: Dict[str, str],
+) -> Dict[str, str]:
+    """Preserve outer context and add the original chunk in source order."""
+    return {
+        "prev": context.get("prev", ""),
+        "next": context.get("next", ""),
+        "full_chunk": "\n".join(
+            f"{_translation_id(segment, index)}: {segment['text']}"
+            for index, segment in enumerate(chunk_segments)
+        ),
+    }
+
+
+def _translate_chunk_with_gate(
+    chunk_segments: List[Dict],
+    target_language: str,
+    translation_model: str,
+    reference_material: Optional[str],
+    context: Dict[str, str],
+    locked_terms: Dict[str, str],
+) -> Tuple[Optional[Dict[str, str]], Dict[str, int], Dict[str, List[str]]]:
+    """Translate one chunk, retrying only entries rejected by the gate."""
+    accepted: Dict[str, str] = {}
+    pending_segments = chunk_segments
+    usage_totals: Dict[str, int] = {}
+    defects: Dict[str, List[str]] = {}
+
+    for retry in range(_MAX_TRANSLATION_RETRIES + 1):
+        if retry:
+            pending_ids = ", ".join(
+                _translation_id(segment, index)
+                for index, segment in enumerate(pending_segments)
+            )
+            delay = _translation_retry_delay(retry - 1)
             print(
-                f"Translation: attempt {attempt + 1}/{_MAX_TRANSLATION_ATTEMPTS} "
-                f"retrying in {delay:.1f}s..."
+                f"Translation Gate: retry {retry}/{_MAX_TRANSLATION_RETRIES} "
+                f"for IDs {pending_ids} in {delay:.1f}s..."
             )
             time.sleep(delay)
 
-        try:
-            response = client.chat.completions.create(
-                model=translation_model,
-                messages=[{"role": "user", "content": prompt_text}],
-                temperature=0,
-                response_format={"type": "json_object"},
-                extra_body={"provider": OPENROUTER_PROVIDER_ROUTING},
-            )
-            usage = _usage_from_openai_response(response)
-            last_usage = usage
-            _log_translation_api_tokens("Translation API tokens", usage)
+        retry_context = (
+            context
+            if retry == 0
+            else _context_for_retry(chunk_segments, context)
+        )
+        response_json, usage = _translate_chunk(
+            pending_segments,
+            target_language,
+            translation_model,
+            reference_material,
+            retry_context,
+            locked_terms,
+        )
+        _merge_api_usage_tokens(usage_totals, usage)
+        newly_accepted, defects = _validate_translation_response(
+            response_json,
+            pending_segments,
+            locked_terms,
+        )
+        accepted.update(newly_accepted)
+        if not defects:
+            return accepted, usage_totals, {}
+        pending_segments = [
+            segment
+            for index, segment in enumerate(pending_segments)
+            if _translation_id(segment, index) in defects
+        ]
 
-            response_text = _message_content_from_openai_response(response)
-            response_json = json.loads(response_text)
-            translated_segments = _extract_translations_from_response(
-                response_json, len(chunk_segments)
-            )
-
-            if translated_segments is None:
-                print(
-                    "Warning: Could not extract translations array from response. "
-                    f"Keys present: {list(response_json.keys()) if isinstance(response_json, dict) else type(response_json).__name__}"
-                )
-                if attempt + 1 < _MAX_TRANSLATION_ATTEMPTS:
-                    continue
-                return None, usage
-
-            if len(translated_segments) != len(chunk_segments):
-                non_empty = sum(1 for t in translated_segments if t)
-                print(
-                    f"Warning: Mismatch in segment count for a chunk. "
-                    f"Expected {len(chunk_segments)}, got {len(translated_segments)} "
-                    f"({non_empty} non-empty)."
-                )
-                if non_empty > 0 and len(translated_segments) == len(chunk_segments):
-                    return translated_segments, usage
-                if attempt + 1 < _MAX_TRANSLATION_ATTEMPTS:
-                    continue
-                if translated_segments is not None and len(translated_segments) > 0:
-                    padded = (translated_segments + [""] * len(chunk_segments))[: len(chunk_segments)]
-                    return padded, usage
-                return None, usage
-
-            return translated_segments, usage
-
-        except json.JSONDecodeError as exc:
-            response_text_preview = ""
-            try:
-                response_text_preview = _message_content_from_openai_response(response)[:200]  # type: ignore[possibly-undefined]
-            except Exception:
-                pass
-            print(
-                f"Warning: Failed to decode JSON from the model's response: {exc}. "
-                f"Preview: {response_text_preview!r}"
-            )
-            if attempt + 1 < _MAX_TRANSLATION_ATTEMPTS:
-                continue
-            return None, last_usage
-        except Exception as e:
-            print(f"An unexpected error occurred during chunk translation: {e}")
-            if attempt + 1 < _MAX_TRANSLATION_ATTEMPTS:
-                continue
-            return None, last_usage
-
-    return None, last_usage
+    return None, usage_totals, defects
 
 
 def translate_segments(
@@ -300,29 +385,52 @@ def translate_segments(
     translation_model: str,
     reference_material: Optional[str],
     preserve_punctuation: bool = False,
+    locked_terms: Optional[Dict[str, str]] = None,
 ) -> Optional[List[Dict]]:
     """
     Translates transcribed text segments using an optimized, two-layer strategy.
 
     For shorter texts that fit within the token threshold, it translates the entire
     content in a single batch for maximum speed. For longer texts, it uses a sliding
-    window approach with robust JSON-based chunking and a recursive fallback mechanism.
+    window approach with a Translation Gate for every model response.
 
     Args:
         segments: A list of transcribed segments.
         target_language: The target language for the translation.
         translation_model: The OpenRouter model slug to use for translation.
         reference_material: Optional reference text for context-aware translation.
+        locked_terms: Optional source-to-target terms enforced by the gate.
 
     Returns:
         A list of translated segments, or None if a critical error occurs.
     """
+    # Kept for API compatibility; accepted Translation Sentences always keep punctuation.
+    _ = preserve_punctuation
     print("Translating text using an optimized strategy...")
-    translated_segments_text = []
-    num_segments = len(segments)
+    locked_terms = locked_terms or {}
+    translation_segments = [
+        {**segment, "_translation_id": str(index)}
+        for index, segment in enumerate(segments)
+        if segment.get("text", "").strip() != "[no speech]"
+    ]
+    num_segments = len(translation_segments)
+
+    if not translation_segments:
+        print("No speech segments require translation.")
+        emit_progress(
+            "translation",
+            "complete",
+            "No speech segments require translation",
+            current=0,
+            total=0,
+            pct=100,
+        )
+        return []
+
+    translated_segments_text: Dict[str, str] = {}
 
     # Calculate the total length to decide on the translation strategy
-    full_text = "\n".join([seg["text"] for seg in segments])
+    full_text = "\n".join([seg["text"] for seg in translation_segments])
     # A rough estimation of the overhead from the prompt template and reference material
     prompt_overhead = len(reference_material or "") + 1000
     total_length = len(full_text) + prompt_overhead
@@ -348,29 +456,27 @@ def translate_segments(
                     "running",
                     "Translating single batch",
                 )
-                translated_segments_text, chunk_usage = _translate_chunk(
-                    segments,
+                translated_segments_text, chunk_usage, defects = _translate_chunk_with_gate(
+                    translation_segments,
                     target_language,
                     translation_model,
                     reference_material,
                     context={},
+                    locked_terms=locked_terms,
                 )
                 pbar.update(1)
             _merge_api_usage_tokens(usage_totals, chunk_usage)
 
             if translated_segments_text is None:
-                print(
-                    "Single batch translation failed (likely segment mismatch). "
-                    "Falling back to sliding window strategy."
-                )
-                use_sliding_window = True
+                _report_translation_gate_failure(defects)
+                return None
         else:
             print("Text is too long, using sliding window translation.")
             use_sliding_window = True
 
         # Strategy 2: Sliding Window (Chunks)
         if use_sliding_window:
-            translated_segments_text = []
+            translated_segments_text = {}
             num_chunks = (num_segments + CHUNK_SIZE - 1) // CHUNK_SIZE
             emit_progress(
                 "translation_strategy",
@@ -386,14 +492,14 @@ def translate_segments(
             ):
                 start_index = i * CHUNK_SIZE
                 end_index = min(start_index + CHUNK_SIZE, num_segments)
-                chunk = segments[start_index:end_index]
+                chunk = translation_segments[start_index:end_index]
 
                 # Define context
                 prev_start = max(0, start_index - OVERLAP_SIZE)
-                prev_context_segments = segments[prev_start:start_index]
+                prev_context_segments = translation_segments[prev_start:start_index]
                 next_start = end_index
                 next_end = min(next_start + OVERLAP_SIZE, num_segments)
-                next_context_segments = segments[next_start:next_end]
+                next_context_segments = translation_segments[next_start:next_end]
 
                 context = {
                     'prev': "\n".join([seg["text"] for seg in prev_context_segments]),
@@ -407,67 +513,22 @@ def translate_segments(
                     current=i + 1,
                     total=num_chunks,
                 )
-                translated_chunk, u = _translate_chunk(
+                translated_chunk, u, defects = _translate_chunk_with_gate(
                     chunk,
                     target_language,
                     translation_model,
                     reference_material,
                     context,
+                    locked_terms,
                 )
                 _merge_api_usage_tokens(usage_totals, u)
 
                 if translated_chunk is None:
-                    tqdm.write(
-                        f"Warning: Chunk {i} failed. Attempting to split "
-                        "into smaller sub-chunks (size 50)."
-                    )
-                    translated_chunk = []
-                    sub_chunk_size = 50
-
-                    for j in range(0, len(chunk), sub_chunk_size):
-                        sub_chunk = chunk[j: j + sub_chunk_size]
-                        sub_result, su = _translate_chunk(
-                            sub_chunk,
-                            target_language,
-                            translation_model,
-                            reference_material,
-                            context,
-                        )
-                        _merge_api_usage_tokens(usage_totals, su)
-
-                        if sub_result is None:
-                            tqdm.write(
-                                f"  Warning: Sub-chunk starting at {j} "
-                                "failed. Splitting into mini-chunks "
-                                "(size 10)."
-                            )
-                            mini_chunk_size = 10
-
-                            for k in range(0, len(sub_chunk), mini_chunk_size):
-                                mini_chunk = sub_chunk[k: k + mini_chunk_size]
-                                mini_result, mu = _translate_chunk(
-                                    mini_chunk,
-                                    target_language,
-                                    translation_model,
-                                    reference_material,
-                                    context,
-                                )
-                                _merge_api_usage_tokens(usage_totals, mu)
-
-                                if mini_result is None:
-                                    tqdm.write(
-                                        f"    Error: Mini-chunk starting "
-                                        f"at {k} failed. Skipping translation "
-                                        "for this small section."
-                                    )
-                                    translated_chunk.extend([""] * len(mini_chunk))
-                                else:
-                                    translated_chunk.extend(mini_result)
-                        else:
-                            translated_chunk.extend(sub_result)
+                    _report_translation_gate_failure(defects)
+                    return None
 
                 if translated_chunk:
-                    translated_segments_text.extend(translated_chunk)
+                    translated_segments_text.update(translated_chunk)
                     emit_progress(
                         "translation",
                         "complete",
@@ -481,27 +542,18 @@ def translate_segments(
             usage_totals,
         )
 
-        if translated_segments_text is None:
-            translated_segments_text = []
-
         final_segments = []
         for i, segment in enumerate(segments):
-            translated_segment = segment.copy()
             original_text = segment.get("text", "").strip()
-            translated_segment["source_text"] = original_text
-
             if original_text == "[no speech]":
-                translated_segment["text"] = ""
-            elif i < len(translated_segments_text):
-                translated_text = translated_segments_text[i]
-                if not preserve_punctuation:
-                    translated_text = translated_text.replace("，", " ").replace(
-                        "。", " "
-                    )
-                translated_text = translated_text.strip()
-                translated_segment["text"] = translated_text
-            else:
-                translated_segment["text"] = ""
+                continue
+            translated_text = translated_segments_text.get(str(i))
+            if translated_text is None:
+                _report_translation_gate_failure({str(i): ["missing_id"]})
+                return None
+            translated_segment = segment.copy()
+            translated_segment["source_text"] = original_text
+            translated_segment["text"] = translated_text
             final_segments.append(translated_segment)
 
         print("Text translated successfully.")
