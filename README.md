@@ -38,6 +38,16 @@ conda run -n hermecho python -m pip install -e ".[dev]"
 conda run -n hermecho python --version
 ```
 
+On Apple Silicon, install the optional MLX Whisper runtime to try the large-v3
+candidate backend:
+
+```bash
+python -m pip install -e ".[mlx]"
+```
+
+MLX model weights download on first use. It is opt-in: `auto` continues to use
+portable Whisper until the comparison run receives Human Approval.
+
 `requirements.txt` is kept for compatibility and installs the editable package:
 
 ```bash
@@ -103,6 +113,7 @@ Run `hermecho --help` for the full list.
 | --- | --- |
 | `video_filename` | File name inside `--input_dir`. |
 | `--model` | Whisper model size, default `large`. |
+| `--transcription-backend` | `auto` (currently Whisper), `whisper`, or Apple-Silicon-only `mlx`. MLX supports `large` / `large-v3` as large-v3. |
 | `--language` | Source audio language, auto-detected by default. |
 | `--target_language` | Translation target, default `Traditional Chinese (Taiwan)`. |
 | `--translation_model` | OpenRouter model slug, default `deepseek/deepseek-v4-pro`. |

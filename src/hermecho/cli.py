@@ -37,6 +37,12 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     )
     parser.add_argument("--model", default="large", help="The Whisper model for transcription.")
     parser.add_argument(
+        "--transcription-backend",
+        choices=("auto", "whisper", "mlx"),
+        default="auto",
+        help="Transcription runtime; auto currently uses portable Whisper. MLX requires Apple Silicon and .[mlx].",
+    )
+    parser.add_argument(
         "--language",
         default=None,
         help="The language of the audio for transcription (default: auto-detect).",

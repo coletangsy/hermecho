@@ -17,7 +17,7 @@ from .subtitles import (
     limit_portrait_subtitle_lines,
     split_long_segments,
 )
-from .transcription import transcribe_audio
+from .transcription import transcribe_audio, validate_mlx_backend
 from .translation import translate_segments
 from .utils import _print_segments, load_locked_terms, load_reference_material
 from .video_processing import burn_subtitles_into_video, extract_audio, is_portrait_video
@@ -30,6 +30,7 @@ class PipelineConfig:
     srt_only: bool = False
     save_source_transcript: bool = False
     model: str = "large"
+    transcription_backend: str = "auto"
     language: Optional[str] = None
     target_language: str = "Traditional Chinese (Taiwan)"
     translation_model: str = "deepseek/deepseek-v4-pro"
@@ -68,6 +69,13 @@ def _stage_cooldown(seconds: int) -> None:
 
 def process_video(config: PipelineConfig) -> None:
     """Run the configured Hermecho video translation pipeline."""
+    if config.transcription_backend == "mlx":
+        error = validate_mlx_backend(config.model)
+        if error:
+            print(f"Error: {error}")
+            emit_progress("transcription", "error", error)
+            return
+
     total_stages = 3 if config.transcribe_only else 4
     if not config.transcribe_only and not config.srt_only:
         total_stages += 1
@@ -98,6 +106,7 @@ def process_video(config: PipelineConfig) -> None:
             model=config.model,
             language=config.language,
             temperature=config.temperature,
+            backend=config.transcription_backend,
         )
         if not transcribed_segments:
             emit_progress("transcription", "error", "Audio transcription failed")

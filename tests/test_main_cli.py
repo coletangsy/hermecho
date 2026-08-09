@@ -46,6 +46,7 @@ class TestCliArguments(unittest.TestCase):
         self.assertIsInstance(config, PipelineConfig)
         self.assertEqual(config.video_filename, "clip.mp4")
         self.assertEqual(config.model, "large")
+        self.assertEqual(config.transcription_backend, "auto")
         self.assertIsNone(config.language)
         self.assertEqual(config.target_language, "Traditional Chinese (Taiwan)")
         self.assertEqual(config.translation_model, "deepseek/deepseek-v4-pro")
@@ -58,6 +59,15 @@ class TestCliArguments(unittest.TestCase):
         self.assertFalse(config.transcribe_only)
         self.assertFalse(config.srt_only)
         self.assertTrue(config.box_background)
+
+    def test_parse_args_accepts_explicit_transcription_backends(self) -> None:
+        for backend in ("mlx", "whisper"):
+            with self.subTest(backend=backend):
+                config = cli.config_from_args(
+                    cli.parse_args(["clip.mp4", "--transcription-backend", backend])
+                )
+
+                self.assertEqual(config.transcription_backend, backend)
 
     def test_parse_args_preserves_fonts_dir(self) -> None:
         config = cli.config_from_args(
@@ -298,6 +308,34 @@ class TestPipelineOrchestration(unittest.TestCase):
         self.assertTrue(any("--locked-terms-file" in message for message in messages))
         self.assertTrue(any("translation_gate" in message for message in messages))
 
+    def test_mlx_preflight_blocks_extraction_when_unavailable(self) -> None:
+        cases = (
+            ("unsupported model", "Darwin", "arm64", "tiny", "supports only large-v3"),
+            ("unsupported platform", "Linux", "x86_64", "large", "requires Apple Silicon"),
+            ("missing runtime", "Darwin", "arm64", "large", 'install -e ".[mlx]"'),
+        )
+
+        for name, system, machine, model, expected_error in cases:
+            with self.subTest(name=name), \
+                patch("hermecho.transcription.platform.system", return_value=system), \
+                patch("hermecho.transcription.platform.machine", return_value=machine), \
+                patch.dict(sys.modules, {"mlx_whisper": None}), \
+                patch("hermecho.pipeline.extract_audio", return_value=None) as extract, \
+                patch("builtins.print") as mock_print:
+                cli.process_video(
+                    PipelineConfig(
+                        video_filename="clip.mp4",
+                        model=model,
+                        transcription_backend="mlx",
+                        stage_cooldown=0,
+                    )
+                )
+
+            extract.assert_not_called()
+            messages = "\n".join(call.args[0] for call in mock_print.call_args_list)
+            self.assertIn(expected_error, messages)
+            self.assertIn('"stage": "transcription", "status": "error"', messages)
+
     def test_portrait_pipeline_limits_cues_and_uses_them_for_both_outputs(self) -> None:
         with tempfile.NamedTemporaryFile(suffix=".mp3", delete=False) as tmp:
             audio_path = tmp.name
@@ -454,6 +492,7 @@ class TestPipelineOrchestration(unittest.TestCase):
             model="tiny",
             language="ko",
             temperature=0.0,
+            backend="auto",
         )
         adjust.assert_called_once_with(
             translated,

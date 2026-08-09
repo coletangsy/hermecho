@@ -19,6 +19,9 @@ dependencies = [
 dev = [
     "pytest",
 ]
+mlx = [
+    "mlx-whisper",
+]
 
 [project.scripts]
 hermecho = "hermecho.cli:main"
