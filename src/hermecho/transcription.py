@@ -3,7 +3,10 @@ Local Whisper transcription with an optional MLX backend.
 """
 import os
 import platform
+from pathlib import Path
 from typing import Any, Dict, List, Optional
+
+from .asr_comparison import DEFAULT_EVIDENCE_DIR, evidence_allows_mlx
 
 
 MLX_LARGE_V3_MODEL = "mlx-community/whisper-large-v3-mlx"
@@ -30,6 +33,20 @@ def validate_mlx_backend(model: str) -> Optional[str]:
     except ImportError:
         return 'MLX Whisper is not installed. Install it with `python -m pip install -e ".[mlx]"`.'
     return None
+
+
+def resolve_transcription_backend(
+    requested_backend: str,
+    model: str,
+    comparison_evidence_dir: str | Path | None = None,
+) -> str:
+    """Resolve ``auto`` only after supported MLX has approved faster evidence."""
+    if requested_backend != "auto":
+        return requested_backend
+    evidence_dir = DEFAULT_EVIDENCE_DIR if comparison_evidence_dir is None else comparison_evidence_dir
+    if validate_mlx_backend(model) is None and evidence_allows_mlx(evidence_dir, model=model):
+        return "mlx"
+    return "whisper"
 
 
 def _normalise_mlx_result(result: Any) -> tuple[str, List[Dict]]:
@@ -129,7 +146,7 @@ def transcribe_audio(
             print(f"Error: Audio file not found at {audio_path}")
             return None
 
-        selected_backend = "whisper" if backend == "auto" else backend
+        selected_backend = resolve_transcription_backend(backend, model)
         if selected_backend == "mlx":
             return _transcribe_with_mlx(audio_path, model, language, temperature)
         if selected_backend != "whisper":

@@ -1,11 +1,13 @@
 """
 This module contains functions for translating text using OpenRouter.
 """
+import hashlib
+import inspect
 import json
 import os
 import random
 import time
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from tqdm import tqdm
 
@@ -28,6 +30,16 @@ OPENROUTER_PROVIDER_ROUTING = {
     "allow_fallbacks": True,
     "require_parameters": True,
 }
+
+
+def translation_prompt_fingerprint() -> str:
+    """Return a fingerprint that changes whenever the translation prompt changes."""
+    try:
+        source = inspect.getsource(build_translation_prompt)
+    except (OSError, TypeError):
+        code = build_translation_prompt.__code__
+        source = repr((code.co_code, code.co_consts))
+    return hashlib.sha256(source.encode("utf-8")).hexdigest()
 
 
 class _JSONObject(dict):
@@ -386,6 +398,12 @@ def translate_segments(
     reference_material: Optional[str],
     preserve_punctuation: bool = False,
     locked_terms: Optional[Dict[str, str]] = None,
+    accepted_chunk_loader: Optional[
+        Callable[[int, List[Dict]], Optional[Dict[str, str]]]
+    ] = None,
+    accepted_chunk_saver: Optional[
+        Callable[[int, List[Dict], Dict[str, str]], None]
+    ] = None,
 ) -> Optional[List[Dict]]:
     """
     Translates transcribed text segments using an optimized, two-layer strategy.
@@ -400,6 +418,8 @@ def translate_segments(
         translation_model: The OpenRouter model slug to use for translation.
         reference_material: Optional reference text for context-aware translation.
         locked_terms: Optional source-to-target terms enforced by the gate.
+        accepted_chunk_loader: Optional source of previously accepted chunks.
+        accepted_chunk_saver: Optional destination for newly accepted chunks.
 
     Returns:
         A list of translated segments, or None if a critical error occurs.
@@ -429,6 +449,19 @@ def translate_segments(
 
     translated_segments_text: Dict[str, str] = {}
 
+    def load_accepted_chunk(chunk_index: int, chunk: List[Dict]) -> Optional[Dict[str, str]]:
+        if accepted_chunk_loader is None:
+            return None
+        cached = accepted_chunk_loader(chunk_index, chunk)
+        if cached is None:
+            return None
+        accepted, defects = _validate_translation_response(
+            {"translations": cached},
+            chunk,
+            locked_terms,
+        )
+        return accepted if not defects else None
+
     # Calculate the total length to decide on the translation strategy
     full_text = "\n".join([seg["text"] for seg in translation_segments])
     # A rough estimation of the overhead from the prompt template and reference material
@@ -456,14 +489,20 @@ def translate_segments(
                     "running",
                     "Translating single batch",
                 )
-                translated_segments_text, chunk_usage, defects = _translate_chunk_with_gate(
-                    translation_segments,
-                    target_language,
-                    translation_model,
-                    reference_material,
-                    context={},
-                    locked_terms=locked_terms,
-                )
+                translated_segments_text = load_accepted_chunk(0, translation_segments)
+                chunk_usage: Dict[str, int] = {}
+                defects: Dict[str, List[str]] = {}
+                if translated_segments_text is None:
+                    translated_segments_text, chunk_usage, defects = _translate_chunk_with_gate(
+                        translation_segments,
+                        target_language,
+                        translation_model,
+                        reference_material,
+                        context={},
+                        locked_terms=locked_terms,
+                    )
+                    if translated_segments_text is not None and accepted_chunk_saver is not None:
+                        accepted_chunk_saver(0, translation_segments, translated_segments_text)
                 pbar.update(1)
             _merge_api_usage_tokens(usage_totals, chunk_usage)
 
@@ -513,14 +552,20 @@ def translate_segments(
                     current=i + 1,
                     total=num_chunks,
                 )
-                translated_chunk, u, defects = _translate_chunk_with_gate(
-                    chunk,
-                    target_language,
-                    translation_model,
-                    reference_material,
-                    context,
-                    locked_terms,
-                )
+                translated_chunk = load_accepted_chunk(i, chunk)
+                u: Dict[str, int] = {}
+                defects: Dict[str, List[str]] = {}
+                if translated_chunk is None:
+                    translated_chunk, u, defects = _translate_chunk_with_gate(
+                        chunk,
+                        target_language,
+                        translation_model,
+                        reference_material,
+                        context,
+                        locked_terms,
+                    )
+                    if translated_chunk is not None and accepted_chunk_saver is not None:
+                        accepted_chunk_saver(i, chunk, translated_chunk)
                 _merge_api_usage_tokens(usage_totals, u)
 
                 if translated_chunk is None:

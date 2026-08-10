@@ -9,6 +9,7 @@ from typing import Optional
 
 from tqdm import trange
 
+from .checkpoints import CheckpointStore, fingerprint_data, fingerprint_file
 from .progress import emit_progress
 from .subtitles import (
     adjust_subtitle_timing,
@@ -19,8 +20,12 @@ from .subtitles import (
     generate_srt,
     split_long_segments,
 )
-from .transcription import transcribe_audio, validate_mlx_backend
-from .translation import translate_segments
+from .transcription import (
+    resolve_transcription_backend,
+    transcribe_audio,
+    validate_mlx_backend,
+)
+from .translation import translate_segments, translation_prompt_fingerprint
 from .utils import _print_segments, load_locked_terms, load_reference_material
 from .video_processing import burn_subtitles_into_video, extract_audio, is_portrait_video
 
@@ -51,6 +56,7 @@ class PipelineConfig:
     margin_h: int = 10
     alignment: int = 2
     stage_cooldown: int = 60
+    force: bool = False
 
 
 def _stage_banner(current: int, total: int, label: str) -> None:
@@ -71,7 +77,13 @@ def _stage_cooldown(seconds: int) -> None:
 
 def process_video(config: PipelineConfig) -> None:
     """Run the configured Hermecho video translation pipeline."""
-    if config.transcription_backend == "mlx":
+    comparison_evidence_dir = os.path.join(config.output_dir, "asr-comparison")
+    transcription_backend = resolve_transcription_backend(
+        config.transcription_backend,
+        config.model,
+        comparison_evidence_dir,
+    )
+    if transcription_backend == "mlx":
         error = validate_mlx_backend(config.model)
         if error:
             print(f"Error: {error}")
@@ -93,6 +105,11 @@ def process_video(config: PipelineConfig) -> None:
 
     next_stage("Extracting Audio")
     video_path = os.path.abspath(os.path.join(config.input_dir, config.video_filename))
+    video_name = os.path.splitext(config.video_filename)[0]
+    output_dir = os.path.join(config.output_dir, video_name)
+    checkpoint_store = CheckpointStore(
+        os.path.join(output_dir, ".hermecho-checkpoint.json")
+    )
     emit_progress("audio_extraction", "running", "Extracting audio")
     audio_path = extract_audio(video_path)
     if not audio_path:
@@ -103,16 +120,37 @@ def process_video(config: PipelineConfig) -> None:
     try:
         next_stage("Transcribing Audio")
         emit_progress("transcription", "running", "Transcribing audio")
-        transcribed_segments = transcribe_audio(
-            audio_path,
-            model=config.model,
-            language=config.language,
-            temperature=config.temperature,
-            backend=config.transcription_backend,
+        transcription_fingerprint = fingerprint_data(
+            {
+                "audio": fingerprint_file(audio_path),
+                "backend": transcription_backend,
+                "language": config.language,
+                "model": config.model,
+                "temperature": config.temperature,
+            }
         )
-        if not transcribed_segments:
-            emit_progress("transcription", "error", "Audio transcription failed")
-            return
+        transcribed_segments = (
+            None
+            if config.force
+            else checkpoint_store.load_transcription(transcription_fingerprint)
+        )
+        if transcribed_segments is None:
+            transcribed_segments = transcribe_audio(
+                audio_path,
+                model=config.model,
+                language=config.language,
+                temperature=config.temperature,
+                backend=transcription_backend,
+            )
+            if not transcribed_segments:
+                emit_progress("transcription", "error", "Audio transcription failed")
+                return
+            checkpoint_store.save_transcription(
+                transcription_fingerprint,
+                transcribed_segments,
+            )
+        else:
+            print("Reusing completed transcription checkpoint.")
         emit_progress(
             "transcription",
             "complete",
@@ -143,8 +181,6 @@ def process_video(config: PipelineConfig) -> None:
         ]
         _print_segments("Transcription after Gap-Filling", transcribed_segments)
 
-        video_name = os.path.splitext(config.video_filename)[0]
-        output_dir = os.path.join(config.output_dir, video_name)
         os.makedirs(output_dir, exist_ok=True)
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
 
@@ -196,6 +232,44 @@ def process_video(config: PipelineConfig) -> None:
             "running",
             f"Translating to {config.target_language}",
         )
+        translation_fingerprint = fingerprint_data(
+            {
+                "locked_terms": locked_terms,
+                "model": config.translation_model,
+                "prompt": translation_prompt_fingerprint(),
+                "reference": reference_material or "",
+                "source": fingerprint_data(transcribed_segments),
+                "target_language": config.target_language,
+            }
+        )
+        checkpoint_store.discard_stale_translation(translation_fingerprint)
+
+        def load_accepted_chunk(chunk_index: int, chunk: list[dict]) -> Optional[dict]:
+            if config.force:
+                return None
+            expected_ids = [
+                str(segment.get("_translation_id", index))
+                for index, segment in enumerate(chunk)
+            ]
+            return checkpoint_store.load_accepted_translation_chunk(
+                translation_fingerprint,
+                chunk_index,
+                fingerprint_data(chunk),
+                expected_ids,
+            )
+
+        def save_accepted_chunk(
+            chunk_index: int,
+            chunk: list[dict],
+            translations: dict[str, str],
+        ) -> None:
+            checkpoint_store.save_accepted_translation_chunk(
+                translation_fingerprint,
+                chunk_index,
+                fingerprint_data(chunk),
+                translations,
+            )
+
         translated_segments = translate_segments(
             transcribed_segments,
             target_language=config.target_language,
@@ -203,6 +277,8 @@ def process_video(config: PipelineConfig) -> None:
             reference_material=reference_material,
             locked_terms=locked_terms,
             preserve_punctuation=True,
+            accepted_chunk_loader=load_accepted_chunk,
+            accepted_chunk_saver=save_accepted_chunk,
         )
 
         if translated_segments is not None:

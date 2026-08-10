@@ -5,10 +5,28 @@ import tempfile
 import unittest
 from unittest.mock import MagicMock, patch
 
-from hermecho.transcription import transcribe_audio
+from hermecho.transcription import resolve_transcription_backend, transcribe_audio
 
 
 class TestTranscribeAudio(unittest.TestCase):
+    def test_auto_promotes_mlx_only_when_runtime_and_evidence_are_approved(self) -> None:
+        with patch("hermecho.transcription.validate_mlx_backend", return_value=None), \
+            patch("hermecho.transcription.evidence_allows_mlx", return_value=True):
+            self.assertEqual(resolve_transcription_backend("auto", "large"), "mlx")
+
+        with patch("hermecho.transcription.validate_mlx_backend", return_value="unsupported"), \
+            patch("hermecho.transcription.evidence_allows_mlx", return_value=True):
+            self.assertEqual(resolve_transcription_backend("auto", "large"), "whisper")
+
+        with patch("hermecho.transcription.validate_mlx_backend", return_value=None), \
+            patch("hermecho.transcription.evidence_allows_mlx", return_value=False):
+            self.assertEqual(resolve_transcription_backend("auto", "large"), "whisper")
+
+    def test_explicit_mlx_is_never_downgraded_by_auto_policy(self) -> None:
+        with patch("hermecho.transcription.validate_mlx_backend", return_value="unsupported"), \
+            patch("hermecho.transcription.evidence_allows_mlx", return_value=False):
+            self.assertEqual(resolve_transcription_backend("mlx", "large"), "mlx")
+
     @patch("hermecho.transcription.os.path.exists", return_value=False)
     def test_missing_audio_path_returns_none(self, _mock_exists: MagicMock) -> None:
         out = transcribe_audio("/missing/audio.mp3", model="tiny", language="ko")
@@ -29,7 +47,8 @@ class TestTranscribeAudio(unittest.TestCase):
 
         try:
             fake_whisper = types.SimpleNamespace(load_model=MagicMock(return_value=mock_whisper_model))
-            with patch.dict(sys.modules, {"whisper": fake_whisper}):
+            with patch.dict(sys.modules, {"whisper": fake_whisper}), \
+                patch("hermecho.transcription.evidence_allows_mlx", return_value=False):
                 for backend in ("auto", "whisper"):
                     with self.subTest(backend=backend):
                         fake_whisper.load_model.reset_mock()

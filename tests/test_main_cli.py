@@ -5,6 +5,7 @@ import os
 import subprocess
 import sys
 import tempfile
+from types import SimpleNamespace
 import unittest
 from unittest.mock import MagicMock, patch
 
@@ -58,7 +59,13 @@ class TestCliArguments(unittest.TestCase):
         )
         self.assertFalse(config.transcribe_only)
         self.assertFalse(config.srt_only)
+        self.assertFalse(config.force)
         self.assertTrue(config.box_background)
+
+    def test_parse_args_accepts_force(self) -> None:
+        config = cli.config_from_args(cli.parse_args(["clip.mp4", "--force"]))
+
+        self.assertTrue(config.force)
 
     def test_parse_args_accepts_explicit_transcription_backends(self) -> None:
         for backend in ("mlx", "whisper"):
@@ -92,6 +99,28 @@ class TestCliArguments(unittest.TestCase):
 
 
 class TestPipelineOrchestration(unittest.TestCase):
+    @staticmethod
+    def _checkpoint_response(chunk, *_args, **_kwargs):
+        return (
+            {
+                "translations": {
+                    segment["_translation_id"]: f"translated {segment['_translation_id']}"
+                    for segment in chunk
+                }
+            },
+            None,
+        )
+
+    @staticmethod
+    def _checkpoint_audio(content: bytes) -> str:
+        with tempfile.NamedTemporaryFile(suffix=".mp3", delete=False) as audio:
+            audio.write(content)
+            return audio.name
+
+    @staticmethod
+    def _checkpoint_delivery(cues, _profile):
+        return SimpleNamespace(blocked=False, cues=cues)
+
     def test_translation_gate_blocks_srt_and_video_after_retries(self) -> None:
         with tempfile.NamedTemporaryFile(suffix=".mp3", delete=False) as tmp:
             audio_path = tmp.name
@@ -149,6 +178,8 @@ class TestPipelineOrchestration(unittest.TestCase):
         try:
             for mode in ("transcribe_only", "save_source_transcript"):
                 with self.subTest(mode=mode):
+                    with open(audio_path, "wb") as audio:
+                        audio.write(b"fake")
                     config = PipelineConfig(
                         video_filename="clip.mp4",
                         input_dir="input",
@@ -238,6 +269,8 @@ class TestPipelineOrchestration(unittest.TestCase):
                     ("malformed", malformed_path),
                 ):
                     with self.subTest(locked_terms=label):
+                        with open(audio_path, "wb") as audio:
+                            audio.write(b"fake")
                         config = PipelineConfig(
                             video_filename="clip.mp4",
                             input_dir="input",
@@ -492,7 +525,7 @@ class TestPipelineOrchestration(unittest.TestCase):
             model="tiny",
             language="ko",
             temperature=0.0,
-            backend="auto",
+            backend="whisper",
         )
         adjust.assert_called_once_with(
             translated,
@@ -548,6 +581,169 @@ class TestPipelineOrchestration(unittest.TestCase):
         finally:
             if os.path.exists(audio_path):
                 os.unlink(audio_path)
+
+    def test_pipeline_resumes_accepted_translation_chunks_after_interruption(self) -> None:
+        source_segments = [
+            {"start": float(index), "end": float(index + 1), "text": f"line {index}"}
+            for index in range(201)
+        ]
+        output_dir = tempfile.mkdtemp()
+        audio_paths = [
+            self._checkpoint_audio(b"same audio"),
+            self._checkpoint_audio(b"same audio"),
+        ]
+        config = PipelineConfig(
+            video_filename="clip.mp4",
+            input_dir="input",
+            output_dir=output_dir,
+            transcription_backend="whisper",
+            srt_only=True,
+            stage_cooldown=0,
+        )
+        requests = []
+        interrupted = False
+
+        def translate_chunk(chunk, *_args, **_kwargs):
+            nonlocal interrupted
+            requested_ids = [segment["_translation_id"] for segment in chunk]
+            requests.append(requested_ids)
+            if requested_ids == ["200"] and not interrupted:
+                interrupted = True
+                raise KeyboardInterrupt
+            return self._checkpoint_response(chunk)
+
+        try:
+            with patch("hermecho.pipeline.extract_audio", side_effect=audio_paths), \
+                patch("hermecho.pipeline.transcribe_audio", return_value=source_segments) as transcribe, \
+                patch("hermecho.pipeline.is_portrait_video", return_value=False), \
+                patch("hermecho.pipeline.load_reference_material", return_value=""), \
+                patch("hermecho.pipeline.load_locked_terms", return_value={}), \
+                patch("hermecho.pipeline.adjust_subtitle_timing", side_effect=lambda cues, *_args, **_kwargs: cues), \
+                patch("hermecho.pipeline.apply_delivery_profile", side_effect=self._checkpoint_delivery), \
+                patch("hermecho.pipeline.delivery_gate_report", return_value="ok"), \
+                patch("hermecho.pipeline.generate_srt"), \
+                patch("hermecho.translation.TOKEN_THRESHOLD", 1), \
+                patch("hermecho.translation._translate_chunk", side_effect=translate_chunk):
+                with self.assertRaises(KeyboardInterrupt):
+                    cli.process_video(config)
+                cli.process_video(config)
+        finally:
+            for audio_path in audio_paths:
+                if os.path.exists(audio_path):
+                    os.unlink(audio_path)
+
+        self.assertEqual(transcribe.call_count, 1)
+        self.assertEqual(requests[0], [str(index) for index in range(200)])
+        self.assertEqual(requests[1:], [["200"], ["200"]])
+
+    def test_pipeline_reuses_transcription_when_reference_changes(self) -> None:
+        source_segments = [{"start": 0.0, "end": 1.0, "text": "line"}]
+        output_dir = tempfile.mkdtemp()
+        audio_paths = [
+            self._checkpoint_audio(b"same audio"),
+            self._checkpoint_audio(b"same audio"),
+        ]
+        config = PipelineConfig(
+            video_filename="clip.mp4",
+            input_dir="input",
+            output_dir=output_dir,
+            transcription_backend="whisper",
+            srt_only=True,
+            stage_cooldown=0,
+        )
+
+        try:
+            with patch("hermecho.pipeline.extract_audio", side_effect=audio_paths), \
+                patch("hermecho.pipeline.transcribe_audio", return_value=source_segments) as transcribe, \
+                patch("hermecho.pipeline.is_portrait_video", return_value=False), \
+                patch("hermecho.pipeline.load_reference_material", side_effect=["first reference", "changed reference"]), \
+                patch("hermecho.pipeline.load_locked_terms", return_value={}), \
+                patch("hermecho.pipeline.adjust_subtitle_timing", side_effect=lambda cues, *_args, **_kwargs: cues), \
+                patch("hermecho.pipeline.apply_delivery_profile", side_effect=self._checkpoint_delivery), \
+                patch("hermecho.pipeline.delivery_gate_report", return_value="ok"), \
+                patch("hermecho.pipeline.generate_srt"), \
+                patch("hermecho.translation._translate_chunk", side_effect=self._checkpoint_response) as translate:
+                cli.process_video(config)
+                cli.process_video(config)
+        finally:
+            for audio_path in audio_paths:
+                if os.path.exists(audio_path):
+                    os.unlink(audio_path)
+
+        self.assertEqual(transcribe.call_count, 1)
+        self.assertEqual(translate.call_count, 2)
+
+    def test_pipeline_invalidates_transcription_when_audio_changes(self) -> None:
+        source_segments = [{"start": 0.0, "end": 1.0, "text": "line"}]
+        output_dir = tempfile.mkdtemp()
+        audio_paths = [self._checkpoint_audio(b"first audio"), self._checkpoint_audio(b"changed audio")]
+        config = PipelineConfig(
+            video_filename="clip.mp4",
+            input_dir="input",
+            output_dir=output_dir,
+            transcription_backend="whisper",
+            srt_only=True,
+            stage_cooldown=0,
+        )
+
+        try:
+            with patch("hermecho.pipeline.extract_audio", side_effect=audio_paths), \
+                patch("hermecho.pipeline.transcribe_audio", return_value=source_segments) as transcribe, \
+                patch("hermecho.pipeline.is_portrait_video", return_value=False), \
+                patch("hermecho.pipeline.load_reference_material", return_value=""), \
+                patch("hermecho.pipeline.load_locked_terms", return_value={}), \
+                patch("hermecho.pipeline.adjust_subtitle_timing", side_effect=lambda cues, *_args, **_kwargs: cues), \
+                patch("hermecho.pipeline.apply_delivery_profile", side_effect=self._checkpoint_delivery), \
+                patch("hermecho.pipeline.delivery_gate_report", return_value="ok"), \
+                patch("hermecho.pipeline.generate_srt"), \
+                patch("hermecho.translation._translate_chunk", side_effect=self._checkpoint_response) as translate:
+                cli.process_video(config)
+                cli.process_video(config)
+        finally:
+            for audio_path in audio_paths:
+                if os.path.exists(audio_path):
+                    os.unlink(audio_path)
+
+        self.assertEqual(transcribe.call_count, 2)
+        self.assertEqual(translate.call_count, 2)
+
+    def test_pipeline_force_recomputes_transcription_and_translation(self) -> None:
+        source_segments = [{"start": 0.0, "end": 1.0, "text": "line"}]
+        output_dir = tempfile.mkdtemp()
+        audio_paths = [
+            self._checkpoint_audio(b"same audio"),
+            self._checkpoint_audio(b"same audio"),
+        ]
+        base_config = PipelineConfig(
+            video_filename="clip.mp4",
+            input_dir="input",
+            output_dir=output_dir,
+            transcription_backend="whisper",
+            srt_only=True,
+            stage_cooldown=0,
+        )
+        force_config = PipelineConfig(**{**base_config.__dict__, "force": True})
+
+        try:
+            with patch("hermecho.pipeline.extract_audio", side_effect=audio_paths), \
+                patch("hermecho.pipeline.transcribe_audio", return_value=source_segments) as transcribe, \
+                patch("hermecho.pipeline.is_portrait_video", return_value=False), \
+                patch("hermecho.pipeline.load_reference_material", return_value=""), \
+                patch("hermecho.pipeline.load_locked_terms", return_value={}), \
+                patch("hermecho.pipeline.adjust_subtitle_timing", side_effect=lambda cues, *_args, **_kwargs: cues), \
+                patch("hermecho.pipeline.apply_delivery_profile", side_effect=self._checkpoint_delivery), \
+                patch("hermecho.pipeline.delivery_gate_report", return_value="ok"), \
+                patch("hermecho.pipeline.generate_srt"), \
+                patch("hermecho.translation._translate_chunk", side_effect=self._checkpoint_response) as translate:
+                cli.process_video(base_config)
+                cli.process_video(force_config)
+        finally:
+            for audio_path in audio_paths:
+                if os.path.exists(audio_path):
+                    os.unlink(audio_path)
+
+        self.assertEqual(transcribe.call_count, 2)
+        self.assertEqual(translate.call_count, 2)
 
 
 if __name__ == "__main__":

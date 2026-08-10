@@ -45,8 +45,19 @@ candidate backend:
 python -m pip install -e ".[mlx]"
 ```
 
-MLX model weights download on first use. It is opt-in: `auto` continues to use
-portable Whisper until the comparison run receives Human Approval.
+MLX model weights download on first use. `auto` keeps portable Whisper unless
+local Comparison Run evidence records a faster MLX median and explicit Human
+Approval with no Candidate-only regression.
+
+Create that evidence with the fixed ten-minute review range:
+
+```bash
+python -m hermecho.asr_comparison input/20251231_w-yGSP1c3bg.mp4 --language ko
+```
+
+It writes manifests, timings, a source-transcript diff, a shared-audio Review
+Composite, and `output/asr-comparison/review.md`. A reviewer must complete its
+checklist and mark the decision `approved` before `auto` can select MLX.
 
 `requirements.txt` is kept for compatibility and installs the editable package:
 
@@ -113,7 +124,7 @@ Run `hermecho --help` for the full list.
 | --- | --- |
 | `video_filename` | File name inside `--input_dir`. |
 | `--model` | Whisper model size, default `large`. |
-| `--transcription-backend` | `auto` (currently Whisper), `whisper`, or Apple-Silicon-only `mlx`. MLX supports `large` / `large-v3` as large-v3. |
+| `--transcription-backend` | `auto`, `whisper`, or Apple-Silicon-only `mlx`. `auto` selects MLX only with approved faster local comparison evidence; otherwise it uses Whisper. MLX supports `large` / `large-v3` as large-v3. |
 | `--language` | Source audio language, auto-detected by default. |
 | `--target_language` | Translation target, default `Traditional Chinese (Taiwan)`. |
 | `--translation_model` | OpenRouter model slug, default `deepseek/deepseek-v4-pro`. |
@@ -128,8 +139,9 @@ Run `hermecho --help` for the full list.
 | `--fonts-dir` | Font directory for FFmpeg; defaults to the macOS MobileAsset font directory. |
 | `--margin_v`, `--margin_h`, `--alignment` | Burn-in subtitle placement. |
 | `--stage-cooldown` | Delay between stages, default `60`; use `0` to disable. |
+| `--force` | Recompute all stages instead of reusing completed checkpoints. |
 
-Outputs are written under `output/<video_basename>/` with a `YYYYMMDD_HHMMSS` timestamp. Translated runs also write a matching `*_delivery_gate.txt` report with any presentation warnings, Repair Limits, or Structural Defects.
+Outputs are written under `output/<video_basename>/` with a `YYYYMMDD_HHMMSS` timestamp. Each video also keeps one versioned, atomic `.hermecho-checkpoint.json`: matching completed transcription and Translation-Gate-approved chunks resume automatically; `--force` bypasses it. Translated runs also write a matching `*_delivery_gate.txt` report with any presentation warnings, Repair Limits, or Structural Defects.
 
 ## Hermecho Cloud rollout
 

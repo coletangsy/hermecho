@@ -40,7 +40,7 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
         "--transcription-backend",
         choices=("auto", "whisper", "mlx"),
         default="auto",
-        help="Transcription runtime; auto currently uses portable Whisper. MLX requires Apple Silicon and .[mlx].",
+        help="Transcription runtime; auto uses MLX only with approved faster comparison evidence, otherwise portable Whisper. MLX requires Apple Silicon and .[mlx].",
     )
     parser.add_argument(
         "--language",
@@ -98,6 +98,11 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
         type=int,
         default=60,
         help="Seconds to wait between pipeline stages to avoid API 503 errors.",
+    )
+    parser.add_argument(
+        "--force",
+        action="store_true",
+        help="Recompute all stages instead of reusing completed checkpoints.",
     )
     return parser.parse_args(argv)
 
