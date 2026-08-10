@@ -386,7 +386,9 @@ def run_comparison(config: ComparisonConfig) -> Path:
         warmups.append(warm)
         if not warm["completed"]:
             _write_json(output_dir / "comparison.json", _comparison_report(config, [], warmups))
-            raise RuntimeError(f"Could not warm {backend}; no comparison evidence was approved.")
+            detail = warm.get("error")
+            message = f": {detail}" if isinstance(detail, str) and detail else ""
+            raise RuntimeError(f"Could not warm {backend}{message}; no comparison evidence was approved.")
 
     runs: list[dict[str, Any]] = []
     for iteration in range(1, RUNS_PER_BACKEND + 1):
@@ -619,6 +621,12 @@ def _run_once(
             record.update(_run_artifacts(run_dir))
         except OSError as error:
             record["artifact_error"] = str(error)
+    if result.returncode != 0 or not _has_metrics(record):
+        error = metrics.get("error")
+        if not isinstance(error, str) or not error.strip():
+            error = result.stderr.strip() or result.stdout.strip()
+        if isinstance(error, str) and error.strip():
+            record["error"] = error.strip()
     record["completed"] = result.returncode == 0 and _has_metrics(record) and (
         warm_cache or all(key in record for key in ("source_transcript", "final_subtitles", "video"))
     )

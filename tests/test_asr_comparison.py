@@ -251,6 +251,44 @@ class TestAsrComparisonEvidence(unittest.TestCase):
 
 
 class TestComparisonRun(unittest.TestCase):
+    def test_run_reports_child_output_when_warmup_exits_before_transcription(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / "20251231_w-yGSP1c3bg.mp4"
+            source.write_bytes(b"video")
+
+            def fake_run(command: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+                if command[0] == "ffmpeg":
+                    Path(command[-1]).write_bytes(b"video")
+                    return subprocess.CompletedProcess(command, 0, "", "")
+
+                backend = command[command.index("--backend") + 1]
+                metrics_path = Path(command[command.index("--metrics-file") + 1])
+                metrics_path.parent.mkdir(parents=True, exist_ok=True)
+                metrics_path.write_text(
+                    json.dumps(
+                        {
+                            "transcription_seconds": 1.0 if backend == "whisper" else None,
+                            "end_to_end_seconds": 2.0,
+                            "peak_memory_bytes": 100,
+                        }
+                    ),
+                    encoding="utf-8",
+                )
+                return subprocess.CompletedProcess(
+                    command,
+                    0,
+                    "" if backend == "whisper" else "Error: MLX Whisper is not installed.\n",
+                    "",
+                )
+
+            with patch("hermecho.asr_comparison.subprocess.run", side_effect=fake_run):
+                with self.assertRaisesRegex(
+                    RuntimeError,
+                    "Could not warm mlx: Error: MLX Whisper is not installed",
+                ):
+                    run_comparison(ComparisonConfig(video_path=source, output_dir=root / "comparison"))
+
     def test_run_writes_manifest_review_diff_and_unscaled_shared_audio_composite(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

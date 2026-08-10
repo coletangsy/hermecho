@@ -1,6 +1,7 @@
 """
 Local Whisper transcription with an optional MLX backend.
 """
+import importlib.util
 import os
 import platform
 from pathlib import Path
@@ -28,9 +29,7 @@ def validate_mlx_backend(model: str) -> Optional[str]:
             "MLX Whisper supports only large-v3. "
             "Use --model large or --model large-v3."
         )
-    try:
-        import mlx_whisper  # type: ignore
-    except ImportError:
+    if importlib.util.find_spec("mlx_whisper") is None:
         return 'MLX Whisper is not installed. Install it with `python -m pip install -e ".[mlx]"`.'
     return None
 

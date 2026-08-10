@@ -1,3 +1,4 @@
+import importlib.util
 import os
 import sys
 import types
@@ -5,10 +6,21 @@ import tempfile
 import unittest
 from unittest.mock import MagicMock, patch
 
-from hermecho.transcription import resolve_transcription_backend, transcribe_audio
+from hermecho.transcription import (
+    resolve_transcription_backend,
+    transcribe_audio,
+    validate_mlx_backend,
+)
 
 
 class TestTranscribeAudio(unittest.TestCase):
+    def test_mlx_validation_does_not_import_native_runtime(self) -> None:
+        with patch("platform.system", return_value="Darwin"), \
+            patch("platform.machine", return_value="arm64"), \
+            patch("importlib.util.find_spec", return_value=object()), \
+            patch("builtins.__import__", side_effect=AssertionError("unexpected import")):
+            self.assertIsNone(validate_mlx_backend("large"))
+
     def test_auto_promotes_mlx_only_when_runtime_and_evidence_are_approved(self) -> None:
         with patch("hermecho.transcription.validate_mlx_backend", return_value=None), \
             patch("hermecho.transcription.evidence_allows_mlx", return_value=True):
@@ -101,6 +113,7 @@ class TestTranscribeAudio(unittest.TestCase):
         try:
             with patch("platform.system", return_value="Darwin"), \
                 patch("platform.machine", return_value="arm64"), \
+                patch("importlib.util.find_spec", return_value=object()), \
                 patch.dict(sys.modules, {"mlx_whisper": fake_mlx}), \
                 patch("builtins.print") as mock_print:
                 for model in ("large", "large-v3"):
@@ -157,7 +170,7 @@ class TestTranscribeAudio(unittest.TestCase):
         try:
             with patch("platform.system", return_value="Darwin"), \
                 patch("platform.machine", return_value="arm64"), \
-                patch.dict(sys.modules, {"mlx_whisper": None}), \
+                patch("importlib.util.find_spec", return_value=None), \
                 patch("builtins.print") as mock_print:
                 out = transcribe_audio(path, model="large", language="ko", backend="mlx")
         finally:
@@ -177,6 +190,7 @@ class TestTranscribeAudio(unittest.TestCase):
         try:
             with patch("platform.system", return_value="Darwin"), \
                 patch("platform.machine", return_value="arm64"), \
+                patch("importlib.util.find_spec", return_value=object()), \
                 patch.dict(sys.modules, {"mlx_whisper": fake_mlx, "whisper": fake_whisper}):
                 out = transcribe_audio(path, model="large", language="ko", backend="mlx")
         finally:
