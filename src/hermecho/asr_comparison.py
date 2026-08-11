@@ -630,7 +630,28 @@ def _run_once(
     record["completed"] = result.returncode == 0 and _has_metrics(record) and (
         warm_cache or all(key in record for key in ("source_transcript", "final_subtitles", "video"))
     )
+    if not record["completed"]:
+        _print_failed_run(record, run_dir, result)
     return record
+
+
+def _print_failed_run(
+    record: dict[str, Any],
+    run_dir: Path,
+    result: subprocess.CompletedProcess[str],
+) -> None:
+    run_type = "warmup" if record["warm_cache"] else "run"
+    print(f"Comparison {run_type} failed: backend={record['backend']}, run_dir={run_dir}")
+    detail = record.get("error") or record.get("artifact_error")
+    if isinstance(detail, str) and detail.strip():
+        print(f"Reason: {detail.strip()}")
+    for name, output in (("stderr", result.stderr), ("stdout", result.stdout)):
+        if not isinstance(output, str):
+            continue
+        lines = output.strip().splitlines()
+        if lines:
+            print(f"Child {name} (last {min(len(lines), 40)} lines):")
+            print("\n".join(lines[-40:]))
 
 
 def _pipeline_args(

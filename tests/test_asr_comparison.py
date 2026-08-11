@@ -282,12 +282,20 @@ class TestComparisonRun(unittest.TestCase):
                     "",
                 )
 
-            with patch("hermecho.asr_comparison.subprocess.run", side_effect=fake_run):
+            with (
+                patch("hermecho.asr_comparison.subprocess.run", side_effect=fake_run),
+                patch("builtins.print") as mock_print,
+            ):
                 with self.assertRaisesRegex(
                     RuntimeError,
                     "Could not warm mlx: Error: MLX Whisper is not installed",
                 ):
                     run_comparison(ComparisonConfig(video_path=source, output_dir=root / "comparison"))
+
+            printed = "\n".join(str(call.args[0]) for call in mock_print.call_args_list)
+            self.assertIn("Comparison warmup failed: backend=mlx", printed)
+            self.assertIn("Error: MLX Whisper is not installed", printed)
+            self.assertIn("Child stdout", printed)
 
     def test_run_writes_manifest_review_diff_and_unscaled_shared_audio_composite(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
