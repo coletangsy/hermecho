@@ -96,3 +96,43 @@ def build_translation_prompt(
         f"The dict must have exactly {len(chunk_segments)} key(s): {', '.join(main_text_dict)}."
     )
     return prompt_text
+
+
+def build_fit_repair_prompt(
+    source_text: str,
+    translation_sentence: str,
+    target_language: str,
+    reference_material: Optional[str],
+    locked_terms: Optional[Dict[str, str]],
+    profile_name: str,
+) -> str:
+    """Build a targeted prompt for shortening one accepted Translation Sentence."""
+    locked_terms_json = json.dumps(locked_terms or {}, ensure_ascii=False)
+    reference_text = reference_material or "(none)"
+    return (
+        f"Shorten this one {target_language} Translation Sentence for the "
+        f"{profile_name} Delivery Profile. Preserve meaning, terminal punctuation, "
+        "and every Locked Term. Return only the JSON object shown.\n"
+        f"Source Sentence: {source_text}\n"
+        f"Accepted Translation Sentence: {translation_sentence}\n"
+        f"Reference Material: {reference_text}\n"
+        f"Locked Terms: {locked_terms_json}\n"
+        '{"translations": {"0": "shortened translation"}}'
+    )
+
+
+def build_alignment_prompt(
+    source_text: str,
+    translation_sentence: str,
+    source_words: List[Dict],
+    target_language: str,
+) -> str:
+    """Build a targeted prompt for mapping unchanged target text to Source Words."""
+    return (
+        f"Map this accepted {target_language} Translation Sentence to the ordered Source Words. "
+        "Do not rewrite, omit, duplicate, or add any target text. Return only JSON.\n"
+        f"Source Sentence: {source_text}\n"
+        f"Translation Sentence: {translation_sentence}\n"
+        f"Source Words: {json.dumps(source_words, ensure_ascii=False)}\n"
+        '{"pieces": [{"text": "exact target piece", "end_source_word_index": 0}]}'
+    )

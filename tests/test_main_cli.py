@@ -76,6 +76,15 @@ class TestCliArguments(unittest.TestCase):
 
                 self.assertEqual(config.transcription_backend, backend)
 
+    def test_parse_args_accepts_subtitle_delivery_modes(self) -> None:
+        for mode in ("auto", "legacy", "sentence-first"):
+            with self.subTest(mode=mode):
+                config = cli.config_from_args(
+                    cli.parse_args(["clip.mp4", "--subtitle-delivery", mode])
+                )
+
+                self.assertEqual(config.subtitle_delivery, mode)
+
     def test_parse_args_preserves_fonts_dir(self) -> None:
         config = cli.config_from_args(
             cli.parse_args(["clip.mp4", "--fonts-dir", "/tmp/pingfang"])
@@ -535,6 +544,87 @@ class TestPipelineOrchestration(unittest.TestCase):
         generate_srt.assert_called_once_with(adjusted, generate_srt.call_args.args[1])
         self.assertTrue(translate.call_args.kwargs["preserve_punctuation"])
         self.assertEqual(generate_srt.call_args.args[0][0]["text"], "你好，世界。")
+
+    def test_sentence_first_pipeline_translates_source_sentences_with_word_evidence(self) -> None:
+        with tempfile.NamedTemporaryFile(suffix=".mp3", delete=False) as tmp:
+            audio_path = tmp.name
+            tmp.write(b"fake")
+
+        source_words = [
+            {"word": "안녕 ", "start": 0.0, "end": 0.4},
+            {"word": "하세요.", "start": 0.5, "end": 1.0},
+        ]
+        transcribed = [{
+            "start": 0.0,
+            "end": 1.0,
+            "text": "안녕하세요.",
+            "words": source_words,
+        }]
+        translated = [{
+            "start": 0.0,
+            "end": 1.0,
+            "text": "你好。",
+            "source_text": "안녕하세요.",
+            "source_words": source_words,
+            "source_word_indices": [0, 1],
+        }]
+        config = PipelineConfig(
+            video_filename="clip.mp4",
+            input_dir="input",
+            output_dir=tempfile.mkdtemp(),
+            language="ko",
+            srt_only=True,
+            subtitle_delivery="sentence-first",
+            stage_cooldown=0,
+        )
+
+        try:
+            with patch("hermecho.pipeline.extract_audio", return_value=audio_path), \
+                patch("hermecho.pipeline.transcribe_audio", return_value=transcribed), \
+                patch("hermecho.pipeline.translate_segments", return_value=translated) as translate, \
+                patch("hermecho.pipeline.is_portrait_video", return_value=False), \
+                patch("hermecho.pipeline.load_reference_material", return_value=""), \
+                patch("hermecho.pipeline.generate_srt") as generate_srt:
+                cli.process_video(config)
+        finally:
+            if os.path.exists(audio_path):
+                os.unlink(audio_path)
+
+        source_sentences = translate.call_args.args[0]
+        self.assertEqual(len(source_sentences), 1)
+        self.assertEqual(source_sentences[0]["text"], "안녕하세요.")
+        self.assertEqual(source_sentences[0]["source_words"], source_words)
+        self.assertEqual(generate_srt.call_args.args[0][0]["text"], "你好。")
+
+    def test_sentence_first_pipeline_blocks_missing_word_timing_without_translation(self) -> None:
+        with tempfile.NamedTemporaryFile(suffix=".mp3", delete=False) as tmp:
+            audio_path = tmp.name
+            tmp.write(b"fake")
+        config = PipelineConfig(
+            video_filename="clip.mp4",
+            input_dir="input",
+            output_dir=tempfile.mkdtemp(),
+            language="ko",
+            srt_only=True,
+            subtitle_delivery="sentence-first",
+            stage_cooldown=0,
+        )
+
+        try:
+            with patch("hermecho.pipeline.extract_audio", return_value=audio_path), \
+                patch(
+                    "hermecho.pipeline.transcribe_audio",
+                    return_value=[{"start": 0.0, "end": 1.0, "text": "안녕."}],
+                ), \
+                patch("hermecho.pipeline.translate_segments") as translate, \
+                patch("hermecho.pipeline.generate_srt") as generate_srt:
+                cli.process_video(config)
+        finally:
+            if os.path.exists(audio_path):
+                os.unlink(audio_path)
+
+        translate.assert_not_called()
+        generate_srt.assert_not_called()
 
     @patch.dict(sys.modules, {"timing_review": None})
     def test_full_pipeline_does_not_import_or_call_timing_review(self) -> None:

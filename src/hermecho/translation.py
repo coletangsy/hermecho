@@ -12,7 +12,11 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 from tqdm import tqdm
 
 from .progress import emit_progress
-from .prompts import build_translation_prompt
+from .prompts import (
+    build_alignment_prompt,
+    build_fit_repair_prompt,
+    build_translation_prompt,
+)
 
 
 # Constants for the sliding window approach
@@ -22,6 +26,7 @@ CHUNK_SIZE = 200          # Number of segments per chunk, increased for better p
 OVERLAP_SIZE = 3         # Number of segments to overlap
 
 _MAX_TRANSLATION_RETRIES = 2
+_TERMINAL_PUNCTUATION = frozenset("。！？!?；;…．.:：")
 
 
 OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
@@ -165,23 +170,12 @@ def _message_content_from_openai_response(response: Any) -> str:
     return content
 
 
-def _translate_chunk(
-    chunk_segments: List[Dict],
-    target_language: str,
+def _request_json_translation(
+    prompt_text: str,
     translation_model: str,
-    reference_material: Optional[str],
-    context: Dict[str, str],
-    locked_terms: Optional[Dict[str, str]] = None,
+    label: str = "Translation",
 ) -> Tuple[Optional[Any], Optional[Dict[str, Any]]]:
-    """Request one untrusted JSON translation response for a chunk."""
-    prompt_text = build_translation_prompt(
-        chunk_segments=chunk_segments,
-        target_language=target_language,
-        reference_material=reference_material,
-        context=context,
-        locked_terms=locked_terms,
-    )
-
+    """Request one untrusted JSON response from OpenRouter."""
     try:
         client = _make_openrouter_client()
     except (RuntimeError, ValueError) as exc:
@@ -199,7 +193,7 @@ def _translate_chunk(
             extra_body={"provider": OPENROUTER_PROVIDER_ROUTING},
         )
         usage = _usage_from_openai_response(response)
-        _log_translation_api_tokens("Translation API tokens", usage)
+        _log_translation_api_tokens(f"{label} API tokens", usage)
         response_text = _message_content_from_openai_response(response)
         return json.loads(response_text, object_pairs_hook=_JSONObject), usage
     except json.JSONDecodeError as exc:
@@ -209,12 +203,37 @@ def _translate_chunk(
         )
         return None, usage
     except Exception as exc:
-        print(f"An unexpected error occurred during chunk translation: {exc}")
+        action = "chunk" if label == "Translation" else label.lower()
+        print(f"An unexpected error occurred during {action} translation: {exc}")
         return None, usage
+
+
+def _translate_chunk(
+    chunk_segments: List[Dict],
+    target_language: str,
+    translation_model: str,
+    reference_material: Optional[str],
+    context: Dict[str, str],
+    locked_terms: Optional[Dict[str, str]] = None,
+) -> Tuple[Optional[Any], Optional[Dict[str, Any]]]:
+    """Request one untrusted JSON translation response for a chunk."""
+    prompt_text = build_translation_prompt(
+        chunk_segments=chunk_segments,
+        target_language=target_language,
+        reference_material=reference_material,
+        context=context,
+        locked_terms=locked_terms,
+    )
+    return _request_json_translation(prompt_text, translation_model)
 
 
 def _translation_id(segment: Dict, index: int) -> str:
     return str(segment.get("_translation_id", index))
+
+
+def _terminal_punctuation(text: str) -> str:
+    stripped = text.rstrip()
+    return stripped[-1] if stripped and stripped[-1] in _TERMINAL_PUNCTUATION else ""
 
 
 def _validate_translation_response(
@@ -295,9 +314,77 @@ def _validate_translation_response(
         if failed_terms:
             defects[translation_id] = failed_terms
             continue
+        source_punctuation = _terminal_punctuation(source_text)
+        if source_punctuation and not _terminal_punctuation(translated_text):
+            defects[translation_id] = ["missing_terminal_punctuation"]
+            continue
         accepted[translation_id] = translated_text
 
     return accepted, defects
+
+
+def fit_repair_translation_sentence(
+    sentence: Dict,
+    *,
+    target_language: str,
+    translation_model: str,
+    reference_material: Optional[str],
+    locked_terms: Optional[Dict[str, str]],
+    profile: Any,
+) -> Optional[str]:
+    """Ask for one concise revision and accept it only through the Translation Gate."""
+    source_text = sentence.get("source_text", sentence.get("text", ""))
+    prompt = build_fit_repair_prompt(
+        str(source_text),
+        str(sentence.get("text", "")),
+        target_language,
+        reference_material,
+        locked_terms,
+        profile.name,
+    )
+    response, _usage = _request_json_translation(
+        prompt,
+        translation_model,
+        label="Fit Repair",
+    )
+    requested = [{"_translation_id": "0", "text": str(source_text)}]
+    accepted, defects = _validate_translation_response(
+        response,
+        requested,
+        locked_terms or {},
+    )
+    return accepted.get("0") if not defects else None
+
+
+def align_translation_sentence(
+    sentence: Dict,
+    *,
+    target_language: str,
+    translation_model: str,
+    profile: Any,
+) -> Optional[List[Dict]]:
+    """Ask for an unchanged target-to-Source-Word mapping."""
+    source_words = [
+        {"source_word_index": index, **word}
+        for index, word in zip(
+            sentence.get("source_word_indices", []),
+            sentence.get("source_words", []),
+        )
+    ]
+    prompt = build_alignment_prompt(
+        str(sentence.get("source_text", sentence.get("text", ""))),
+        str(sentence.get("text", "")),
+        source_words,
+        target_language,
+    )
+    response, _usage = _request_json_translation(
+        prompt,
+        translation_model,
+        label="Alignment",
+    )
+    if not isinstance(response, dict) or not isinstance(response.get("pieces"), list):
+        return None
+    return response["pieces"]
 
 
 def _format_translation_gate_defects(defects: Dict[str, List[str]]) -> str:

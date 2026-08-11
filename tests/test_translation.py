@@ -6,7 +6,12 @@ import types
 import unittest
 from unittest.mock import MagicMock, patch
 
-from hermecho.translation import _translate_chunk, translate_segments
+from hermecho.subtitles import PORTRAIT_DELIVERY_PROFILE
+from hermecho.translation import (
+    _translate_chunk,
+    fit_repair_translation_sentence,
+    translate_segments,
+)
 from hermecho.utils import load_locked_terms
 
 
@@ -486,6 +491,37 @@ class TestOpenRouterTranslation(unittest.TestCase):
 
         self.assertEqual(portrait[0]["text"], "你好，世界。")
         self.assertEqual(landscape[0]["text"], "你好，世界。")
+
+    def test_translation_gate_rejects_dropped_terminal_punctuation(self) -> None:
+        with patch(
+            "hermecho.translation._translate_chunk",
+            return_value=({"translations": {"0": "你好"}}, None),
+        ) as translate_chunk, patch("hermecho.translation.time.sleep"):
+            translated = translate_segments(
+                [{"start": 0.0, "end": 1.0, "text": "안녕하세요."}],
+                target_language="Traditional Chinese (Taiwan)",
+                translation_model="test-model",
+                reference_material=None,
+            )
+
+        self.assertIsNone(translated)
+        self.assertEqual(translate_chunk.call_count, 3)
+
+    def test_fit_repair_is_revalidated_by_the_translation_gate(self) -> None:
+        with patch(
+            "hermecho.translation._request_json_translation",
+            return_value=({"translations": {"0": "短句。"}}, None),
+        ):
+            repaired = fit_repair_translation_sentence(
+                {"source_text": "안녕하세요.", "text": "這是一段過長的翻譯。"},
+                target_language="Traditional Chinese (Taiwan)",
+                translation_model="test-model",
+                reference_material=None,
+                locked_terms={},
+                profile=PORTRAIT_DELIVERY_PROFILE,
+            )
+
+        self.assertEqual(repaired, "短句。")
 
     def test_translate_segments_saves_only_gate_accepted_chunks(self) -> None:
         segments = [{"start": 0.0, "end": 1.0, "text": "first"}]

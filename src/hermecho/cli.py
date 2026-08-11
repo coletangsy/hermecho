@@ -43,6 +43,15 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
         help="Transcription runtime; auto uses MLX only with approved faster comparison evidence, otherwise portable Whisper. MLX requires Apple Silicon and .[mlx].",
     )
     parser.add_argument(
+        "--subtitle-delivery",
+        choices=("auto", "legacy", "sentence-first"),
+        default="auto",
+        help=(
+            "Subtitle delivery mode; auto promotes sentence-first only after "
+            "approved Phase 3 evidence, otherwise uses legacy."
+        ),
+    )
+    parser.add_argument(
         "--language",
         default=None,
         help="The language of the audio for transcription (default: auto-detect).",
