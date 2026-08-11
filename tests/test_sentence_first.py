@@ -247,7 +247,53 @@ class TestSentenceFirstDelivery(unittest.TestCase):
         self.assertEqual(result.cues[1]["start"], 1.0)
         align.assert_called_once()
 
-    def test_invalid_alignment_is_retried_twice_then_blocks_delivery(self) -> None:
+    def test_alignment_merges_point_timed_piece_into_previous_cue(self) -> None:
+        from hermecho.subtitles import DeliveryProfile
+
+        profile = DeliveryProfile(
+            name="test",
+            warning_line_cells=100,
+            repair_line_cells=100,
+            warning_cue_cells=100,
+            repair_cue_cells=100,
+            warning_cps=8,
+            repair_cps=12,
+            warning_min_duration=0,
+            warning_max_duration=100,
+            repair_min_duration=0,
+            repair_max_duration=100,
+        )
+        align = Mock(
+            return_value=[
+                {"text": "甲乙丙丁", "end_source_word_index": 0},
+                {"text": "戊己庚辛", "end_source_word_index": 1},
+                {"text": "壬癸子丑寅", "end_source_word_index": 2},
+            ]
+        )
+
+        result = build_delivery_cues(
+            [
+                {
+                    "start": 0.0,
+                    "end": 1.0,
+                    "text": "甲乙丙丁戊己庚辛壬癸子丑寅",
+                    "source_words": [
+                        {"word": "a", "start": 0.0, "end": 0.3},
+                        {"word": "b", "start": 0.3, "end": 0.3},
+                        {"word": "c", "start": 0.3, "end": 1.0},
+                    ],
+                    "source_word_indices": [0, 1, 2],
+                }
+            ],
+            profile,
+            align=align,
+        )
+
+        self.assertFalse(result.blocked)
+        self.assertEqual([cue["text"] for cue in result.cues], ["甲乙丙丁戊己庚辛", "壬癸子丑寅"])
+        self.assertEqual(result.cues[0]["source_word_indices"], [0, 1])
+
+    def test_invalid_alignment_falls_back_to_the_unsplit_cue(self) -> None:
         from hermecho.subtitles import DeliveryProfile
 
         profile = DeliveryProfile(
@@ -283,10 +329,10 @@ class TestSentenceFirstDelivery(unittest.TestCase):
             align=align,
         )
 
-        self.assertTrue(result.blocked)
+        self.assertFalse(result.blocked)
         self.assertEqual(align.call_count, 2)
         self.assertTrue(
-            any(diagnostic.code == "invalid_alignment" for diagnostic in result.diagnostics)
+            any(diagnostic.severity == "Repair Limit" for diagnostic in result.diagnostics)
         )
 
     def test_unresolved_presentation_limit_is_best_effort_without_structural_failure(self) -> None:

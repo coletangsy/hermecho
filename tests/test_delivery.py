@@ -314,6 +314,19 @@ class TestDeliveryProfiles(unittest.TestCase):
         self.assertIn("Repair Limits: ", report)
         self.assertIn("Repair Limit cue 1: cue_cells", report)
 
+    def test_tolerates_float_noise_at_a_cue_boundary(self) -> None:
+        portrait = delivery_profile_for_orientation(is_portrait=True)
+        result = apply_delivery_profile(
+            [
+                {"start": 0.0, "end": 0.30000000000000004, "text": "甲"},
+                {"start": 0.3, "end": 1.0, "text": "乙"},
+            ],
+            portrait,
+        )
+
+        self.assertFalse(result.blocked)
+        self.assertFalse(any(diagnostic.code == "overlap_timing" for diagnostic in result.diagnostics))
+
     def test_structural_defects_block_delivery(self) -> None:
         portrait = delivery_profile_for_orientation(is_portrait=True)
         result = apply_delivery_profile(

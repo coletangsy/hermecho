@@ -325,7 +325,7 @@ def apply_delivery_profile(
                 "invalid_timing",
                 "cue start and end must not be negative",
             )
-        if end < start:
+        if end < start and not math.isclose(end, start, abs_tol=1e-9):
             _structural_diagnostic(
                 diagnostics,
                 cue_index,
@@ -333,7 +333,7 @@ def apply_delivery_profile(
                 "cue end precedes its start",
             )
             continue
-        if end == start:
+        if math.isclose(end, start, abs_tol=1e-9):
             _structural_diagnostic(
                 diagnostics,
                 cue_index,
@@ -343,7 +343,11 @@ def apply_delivery_profile(
             continue
         if negative_timestamp:
             continue
-        if previous_end is not None and start < previous_end:
+        if (
+            previous_end is not None
+            and start < previous_end
+            and not math.isclose(start, previous_end, abs_tol=1e-9)
+        ):
             _structural_diagnostic(
                 diagnostics,
                 cue_index,

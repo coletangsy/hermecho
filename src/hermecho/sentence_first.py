@@ -415,7 +415,22 @@ def _aligned_cues(
 
     if previous_end != indices[-1] or consumed_text != text:
         raise ValueError("Alignment must cover Source Words and concatenate exactly.")
-    return cues
+
+    merged_cues: List[Dict] = []
+    for cue in cues:
+        point_timed = math.isclose(cue["start"], cue["end"], abs_tol=1e-9)
+        previous_point_timed = bool(merged_cues) and math.isclose(
+            merged_cues[-1]["start"], merged_cues[-1]["end"], abs_tol=1e-9
+        )
+        if merged_cues and (point_timed or previous_point_timed):
+            previous = merged_cues[-1]
+            previous["text"] += cue["text"]
+            previous["end"] = cue["end"]
+            previous["source_words"].extend(cue["source_words"])
+            previous["source_word_indices"].extend(cue["source_word_indices"])
+        else:
+            merged_cues.append(cue)
+    return merged_cues
 
 
 def build_delivery_cues(
@@ -485,16 +500,7 @@ def build_delivery_cues(
                         indices,
                         align({**sentence, "text": accepted_text}, profile),
                     )
-                except (TypeError, ValueError) as error:
-                    if _ == 1:
-                        diagnostics.append(
-                            DeliveryDiagnostic(
-                                "Structural Defect",
-                                "invalid_alignment",
-                                sentence_index,
-                                str(error),
-                            )
-                        )
+                except (TypeError, ValueError):
                     continue
                 cues.extend(aligned)
                 alignment_succeeded = True
