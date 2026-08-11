@@ -27,6 +27,7 @@ OVERLAP_SIZE = 3         # Number of segments to overlap
 
 _MAX_TRANSLATION_RETRIES = 2
 _TERMINAL_PUNCTUATION = frozenset("。！？!?；;…．.:：")
+_CONFIGURATION_ERROR = "_configuration_error"
 
 
 OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
@@ -180,7 +181,7 @@ def _request_json_translation(
         client = _make_openrouter_client()
     except (RuntimeError, ValueError) as exc:
         print(f"Error: {exc}")
-        return None, None
+        return None, {_CONFIGURATION_ERROR: str(exc)}
 
     response_text = ""
     usage: Optional[Dict[str, Any]] = None
@@ -461,6 +462,10 @@ def _translate_chunk_with_gate(
             locked_terms,
         )
         _merge_api_usage_tokens(usage_totals, usage)
+        if usage and _CONFIGURATION_ERROR in usage:
+            return None, usage_totals, {
+                "configuration": [str(usage[_CONFIGURATION_ERROR])]
+            }
         newly_accepted, defects = _validate_translation_response(
             response_json,
             pending_segments,

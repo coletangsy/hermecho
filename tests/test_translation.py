@@ -103,7 +103,10 @@ class TestOpenRouterTranslation(unittest.TestCase):
             )
 
         self.assertIsNone(translated)
-        self.assertIsNone(usage)
+        self.assertEqual(
+            usage,
+            {"_configuration_error": "OPENROUTER_API_KEY is not set."},
+        )
         mock_print.assert_any_call("Error: OPENROUTER_API_KEY is not set.")
 
     def test_translate_chunk_calls_openrouter_chat_completions(self) -> None:
@@ -506,6 +509,22 @@ class TestOpenRouterTranslation(unittest.TestCase):
 
         self.assertIsNone(translated)
         self.assertEqual(translate_chunk.call_count, 3)
+
+    def test_missing_openrouter_key_fails_without_translation_retries(self) -> None:
+        with patch.dict(os.environ, {}, clear=True), patch(
+            "hermecho.translation._make_openrouter_client",
+            side_effect=ValueError("OPENROUTER_API_KEY is not set."),
+        ) as make_client, patch("hermecho.translation.time.sleep") as sleep:
+            translated = translate_segments(
+                [{"start": 0.0, "end": 1.0, "text": "안녕하세요."}],
+                target_language="Traditional Chinese (Taiwan)",
+                translation_model="test-model",
+                reference_material=None,
+            )
+
+        self.assertIsNone(translated)
+        make_client.assert_called_once_with()
+        sleep.assert_not_called()
 
     def test_fit_repair_is_revalidated_by_the_translation_gate(self) -> None:
         with patch(

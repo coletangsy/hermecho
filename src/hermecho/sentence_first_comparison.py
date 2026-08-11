@@ -11,6 +11,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional, Sequence
 
+from dotenv import load_dotenv
+
 from .asr_comparison import _extract_review_range, _write_review_composite
 from .checkpoints import fingerprint_data
 from .sentence_first import REVIEW_CHECKS
@@ -291,11 +293,17 @@ def run_comparison(config: ComparisonConfig) -> Path:
                 transcription_artifact=str(frozen_path),
             )
         )
-        results[mode] = {
-            "source": _one_artifact(mode_dir, "*source*.srt"),
-            "video": _one_artifact(mode_dir, "*translated.mp4"),
-            "gate": _one_artifact(mode_dir, "*_delivery_gate.txt"),
-        }
+        try:
+            results[mode] = {
+                "source": _one_artifact(mode_dir, "*source*.srt"),
+                "video": _one_artifact(mode_dir, "*translated.mp4"),
+                "gate": _one_artifact(mode_dir, "*_delivery_gate.txt"),
+            }
+        except FileNotFoundError as error:
+            raise RuntimeError(
+                f"{mode} delivery did not finish; comparison stopped before review artifacts. "
+                "Check the preceding pipeline error."
+            ) from error
     _write_review_artifacts(
         config.output_dir,
         source_video=config.video_path,
@@ -386,6 +394,7 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> ComparisonConfig:
 
 
 def main(argv: Optional[Sequence[str]] = None) -> None:
+    load_dotenv()
     output_dir = run_comparison(parse_args(argv))
     print(f"Sentence-first comparison evidence written to {output_dir}")
 
