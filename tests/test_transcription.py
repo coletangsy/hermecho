@@ -4,6 +4,7 @@ import sys
 import types
 import tempfile
 import unittest
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 from hermecho.transcription import (
@@ -105,6 +106,9 @@ class TestTranscribeAudio(unittest.TestCase):
             ],
         }
         fake_mlx = types.SimpleNamespace(transcribe=MagicMock(return_value=mlx_result))
+        fake_huggingface_hub = types.SimpleNamespace(
+            try_to_load_from_cache=MagicMock(return_value=None)
+        )
 
         with tempfile.NamedTemporaryFile(suffix=".mp3", delete=False) as tmp:
             path = tmp.name
@@ -114,7 +118,13 @@ class TestTranscribeAudio(unittest.TestCase):
             with patch("platform.system", return_value="Darwin"), \
                 patch("platform.machine", return_value="arm64"), \
                 patch("importlib.util.find_spec", return_value=object()), \
-                patch.dict(sys.modules, {"mlx_whisper": fake_mlx}), \
+                patch.dict(
+                    sys.modules,
+                    {
+                        "mlx_whisper": fake_mlx,
+                        "huggingface_hub": fake_huggingface_hub,
+                    },
+                ), \
                 patch("builtins.print") as mock_print:
                 for model in ("large", "large-v3"):
                     with self.subTest(model=model):
@@ -145,6 +155,82 @@ class TestTranscribeAudio(unittest.TestCase):
         self.assertIsInstance(out[0]["start"], float)
         self.assertIsInstance(out[0]["words"][0]["start"], float)
         mock_print.assert_any_call("MLX Whisper detected language: ko")
+
+    def test_mlx_uses_a_cached_snapshot_when_available(self) -> None:
+        fake_mlx = types.SimpleNamespace(
+            transcribe=MagicMock(return_value={"language": "ko", "segments": []})
+        )
+        with tempfile.TemporaryDirectory() as cache_dir, \
+            tempfile.NamedTemporaryFile(suffix=".mp3", delete=False) as tmp:
+            cache_path = Path(cache_dir)
+            cached_config = cache_path / "config.json"
+            cached_config.touch()
+            (cache_path / "weights.safetensors").touch()
+            fake_huggingface_hub = types.SimpleNamespace(
+                try_to_load_from_cache=MagicMock(return_value=str(cached_config))
+            )
+            path = tmp.name
+            tmp.write(b"fake")
+
+            try:
+                with patch("platform.system", return_value="Darwin"), \
+                    patch("platform.machine", return_value="arm64"), \
+                    patch("importlib.util.find_spec", return_value=object()), \
+                    patch.dict(
+                        sys.modules,
+                        {
+                            "mlx_whisper": fake_mlx,
+                            "huggingface_hub": fake_huggingface_hub,
+                        },
+                    ):
+                    out = transcribe_audio(path, model="large", language="ko", backend="mlx")
+            finally:
+                os.unlink(path)
+
+        self.assertEqual(out, [])
+        fake_huggingface_hub.try_to_load_from_cache.assert_called_once_with(
+            repo_id="mlx-community/whisper-large-v3-mlx",
+            filename="config.json",
+        )
+        self.assertEqual(
+            fake_mlx.transcribe.call_args.kwargs["path_or_hf_repo"],
+            str(cache_path),
+        )
+
+    def test_mlx_uses_remote_repo_for_incomplete_cached_snapshot(self) -> None:
+        fake_mlx = types.SimpleNamespace(
+            transcribe=MagicMock(return_value={"language": "ko", "segments": []})
+        )
+        with tempfile.TemporaryDirectory() as cache_dir, \
+            tempfile.NamedTemporaryFile(suffix=".mp3", delete=False) as tmp:
+            cached_config = Path(cache_dir) / "config.json"
+            cached_config.touch()
+            fake_huggingface_hub = types.SimpleNamespace(
+                try_to_load_from_cache=MagicMock(return_value=str(cached_config))
+            )
+            path = tmp.name
+            tmp.write(b"fake")
+
+            try:
+                with patch("platform.system", return_value="Darwin"), \
+                    patch("platform.machine", return_value="arm64"), \
+                    patch("importlib.util.find_spec", return_value=object()), \
+                    patch.dict(
+                        sys.modules,
+                        {
+                            "mlx_whisper": fake_mlx,
+                            "huggingface_hub": fake_huggingface_hub,
+                        },
+                    ):
+                    out = transcribe_audio(path, model="large", language="ko", backend="mlx")
+            finally:
+                os.unlink(path)
+
+        self.assertEqual(out, [])
+        self.assertEqual(
+            fake_mlx.transcribe.call_args.kwargs["path_or_hf_repo"],
+            "mlx-community/whisper-large-v3-mlx",
+        )
 
     def test_mlx_requires_apple_silicon(self) -> None:
         with tempfile.NamedTemporaryFile(suffix=".mp3", delete=False) as tmp:

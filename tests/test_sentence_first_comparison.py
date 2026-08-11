@@ -23,6 +23,27 @@ class TestSentenceFirstComparison(unittest.TestCase):
 
         load_dotenv.assert_called_once_with()
 
+    def test_requires_subtitles_filter_before_starting_comparison(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_dir:
+            root = Path(temporary_dir)
+            source_video = root / "20251231_w-yGSP1c3bg.mp4"
+            source_video.write_bytes(b"video")
+            output_dir = root / "comparison"
+
+            with patch(
+                "hermecho.video_processing._ffmpeg_supports_subtitles_filter",
+                return_value=False,
+            ), patch(
+                "hermecho.sentence_first_comparison._extract_review_range",
+                side_effect=AssertionError("comparison started before ffmpeg preflight"),
+            ):
+                with self.assertRaisesRegex(RuntimeError, "subtitles.*filter"):
+                    run_comparison(
+                        ComparisonConfig(video_path=source_video, output_dir=output_dir)
+                    )
+
+            self.assertFalse(output_dir.exists())
+
     def test_run_reports_a_failed_delivery_path_before_artifact_lookup(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_dir:
             root = Path(temporary_dir)
@@ -42,6 +63,9 @@ class TestSentenceFirstComparison(unittest.TestCase):
             with patch(
                 "hermecho.sentence_first_comparison._extract_review_range",
                 side_effect=extract_range,
+            ), patch(
+                "hermecho.video_processing._ffmpeg_supports_subtitles_filter",
+                return_value=True,
             ), patch(
                 "hermecho.video_processing.extract_audio",
                 return_value=str(audio_path),
@@ -107,6 +131,9 @@ class TestSentenceFirstComparison(unittest.TestCase):
             with patch(
                 "hermecho.sentence_first_comparison._extract_review_range",
                 side_effect=extract_range,
+            ), patch(
+                "hermecho.video_processing._ffmpeg_supports_subtitles_filter",
+                return_value=True,
             ), patch(
                 "hermecho.video_processing.extract_audio",
                 return_value=str(audio_path),

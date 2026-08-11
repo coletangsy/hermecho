@@ -46,7 +46,8 @@ candidate backend:
 python -m pip install -e ".[mlx]"
 ```
 
-MLX model weights download on first use. `auto` keeps portable Whisper unless
+MLX model weights download on first use, then reuse the local Hugging Face
+snapshot on later runs. `auto` keeps portable Whisper unless
 local Comparison Run evidence records a faster MLX median and explicit Human
 Approval with no Candidate-only regression.
 
@@ -81,6 +82,19 @@ Check `ffmpeg` subtitle support:
 ```bash
 ffmpeg -hide_banner -filters | rg subtitles
 ```
+
+The standard Homebrew `ffmpeg` formula does not include libass. To replace it
+with the libass-enabled `homebrew-ffmpeg` build, run:
+
+```bash
+brew uninstall ffmpeg
+brew trust homebrew-ffmpeg/ffmpeg
+brew tap homebrew-ffmpeg/ffmpeg
+brew install homebrew-ffmpeg/ffmpeg/ffmpeg
+```
+
+This trusts a third-party tap and replaces Homebrew's core `ffmpeg`. It is
+required for hard-burned subtitles and Review Composites.
 
 ## Usage
 

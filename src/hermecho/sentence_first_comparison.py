@@ -211,6 +211,14 @@ def run_comparison(config: ComparisonConfig) -> Path:
         raise ValueError("Phase 3 uses the fixed 10-minute review range.")
     if config.output_dir.exists() and any(config.output_dir.iterdir()):
         raise FileExistsError(f"Comparison output must be empty: {config.output_dir}")
+
+    from .video_processing import _ffmpeg_supports_subtitles_filter
+
+    if not _ffmpeg_supports_subtitles_filter():
+        raise RuntimeError(
+            "Comparison requires an ffmpeg build with the `subtitles` filter "
+            "(libass support) before it starts."
+        )
     config.output_dir.mkdir(parents=True, exist_ok=True)
 
     range_path = config.output_dir / "media_range.mp4"

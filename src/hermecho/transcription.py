@@ -17,6 +17,27 @@ MLX_MODEL_NAMES = {
 }
 
 
+def _mlx_model_path(model: str) -> str:
+    """Prefer the existing local Hugging Face snapshot over a network lookup."""
+    model_repo = MLX_MODEL_NAMES[model]
+    try:
+        from huggingface_hub import try_to_load_from_cache
+    except ImportError:
+        return model_repo
+    cached_config = try_to_load_from_cache(
+        repo_id=model_repo,
+        filename="config.json",
+    )
+    if isinstance(cached_config, str):
+        snapshot_dir = Path(cached_config).parent
+        if any(
+            (snapshot_dir / filename).exists()
+            for filename in ("weights.safetensors", "weights.npz")
+        ):
+            return str(snapshot_dir)
+    return model_repo
+
+
 def validate_mlx_backend(model: str) -> Optional[str]:
     """Return an actionable error when MLX cannot run with this model."""
     if platform.system() != "Darwin" or platform.machine() not in {"arm64", "arm64e"}:
@@ -104,9 +125,9 @@ def _transcribe_with_mlx(
 
     import mlx_whisper  # type: ignore
 
-    mlx_model = MLX_MODEL_NAMES[model]
+    mlx_model = _mlx_model_path(model)
 
-    print(f"Loading MLX Whisper model ({mlx_model})...")
+    print(f"Loading MLX Whisper model from {mlx_model}...")
     result = mlx_whisper.transcribe(  # type: ignore
         audio_path,
         path_or_hf_repo=mlx_model,
