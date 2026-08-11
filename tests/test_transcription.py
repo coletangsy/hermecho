@@ -8,6 +8,7 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 from hermecho.transcription import (
+    _normalise_mlx_result,
     resolve_transcription_backend,
     transcribe_audio,
     validate_mlx_backend,
@@ -155,6 +156,24 @@ class TestTranscribeAudio(unittest.TestCase):
         self.assertIsInstance(out[0]["start"], float)
         self.assertIsInstance(out[0]["words"][0]["start"], float)
         mock_print.assert_any_call("MLX Whisper detected language: ko")
+
+    def test_mlx_skips_blank_segments_without_source_words(self) -> None:
+        _language, segments = _normalise_mlx_result(
+            {
+                "language": "ko",
+                "segments": [
+                    {"start": 0, "end": 1, "text": "", "words": []},
+                    {
+                        "start": 1,
+                        "end": 2,
+                        "text": "안녕",
+                        "words": [{"word": "안녕", "start": 1, "end": 2}],
+                    },
+                ],
+            }
+        )
+
+        self.assertEqual([segment["text"] for segment in segments], ["안녕"])
 
     def test_mlx_uses_a_cached_snapshot_when_available(self) -> None:
         fake_mlx = types.SimpleNamespace(

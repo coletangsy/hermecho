@@ -15,7 +15,7 @@ from dotenv import load_dotenv
 
 from .asr_comparison import _extract_review_range, _write_review_composite
 from .checkpoints import fingerprint_data
-from .sentence_first import REVIEW_CHECKS
+from .sentence_first import REVIEW_CHECKS, SentenceFirstError, build_source_sentences
 
 
 DEFAULT_START = "00:29:30.000"
@@ -249,6 +249,14 @@ def run_comparison(config: ComparisonConfig) -> Path:
             os.remove(audio_path)
     if not transcription:
         raise RuntimeError("Comparison transcription produced no Source Words.")
+    try:
+        build_source_sentences(transcription)
+    except SentenceFirstError as error:
+        raise RuntimeError(
+            "Comparison transcription cannot support sentence-first delivery: "
+            f"{error} Use an ASR backend with valid Source Word timestamps, "
+            "such as `--transcription-backend whisper`."
+        ) from error
 
     frozen_path = config.output_dir / "frozen_transcription.json"
     frozen_fingerprint = fingerprint_data(transcription)

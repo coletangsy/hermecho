@@ -80,22 +80,26 @@ def _normalise_mlx_result(result: Any) -> tuple[str, List[Dict]]:
 
     normalised_segments: List[Dict] = []
     for segment in result["segments"]:
+        text = segment.get("text") if isinstance(segment, dict) else None
+        words = segment.get("words") if isinstance(segment, dict) else None
         if (
             not isinstance(segment, dict)
-            or not isinstance(segment.get("text"), str)
-            or not isinstance(segment.get("words"), list)
+            or not isinstance(text, str)
+            or not isinstance(words, list)
         ):
             raise RuntimeError("MLX Whisper returned an invalid transcription segment.")
+        if not text.strip() and not words:
+            continue
         if not all(
             isinstance(word, dict) and isinstance(word.get("word"), str)
-            for word in segment["words"]
+            for word in words
         ):
             raise RuntimeError("MLX Whisper returned an invalid Source Word timestamp.")
         try:
             normalised_segment = dict(segment)
             normalised_segment["start"] = float(segment["start"])
             normalised_segment["end"] = float(segment["end"])
-            normalised_segment["text"] = segment["text"]
+            normalised_segment["text"] = text
             normalised_segment["words"] = [
                 {
                     **word,
@@ -103,7 +107,7 @@ def _normalise_mlx_result(result: Any) -> tuple[str, List[Dict]]:
                     "start": float(word["start"]),
                     "end": float(word["end"]),
                 }
-                for word in segment["words"]
+                for word in words
             ]
         except (KeyError, TypeError, ValueError) as error:
             raise RuntimeError("MLX Whisper returned invalid segment timestamps.") from error
