@@ -74,7 +74,7 @@ class TestSentenceFirstComparison(unittest.TestCase):
                         "start": 0.0,
                         "end": 1.0,
                         "text": "안녕",
-                        "words": [{"word": "안녕", "start": 0.0, "end": 0.0}],
+                        "words": [{"word": "안녕", "start": 1.0, "end": 0.0}],
                     }
                 ],
             ), patch("hermecho.pipeline.process_video") as process_video:

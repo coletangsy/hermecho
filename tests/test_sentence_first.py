@@ -59,6 +59,19 @@ class TestSourceSentences(unittest.TestCase):
 
         self.assertEqual([sentence["text"] for sentence in sentences], ["안녕."])
 
+    def test_preserves_point_timed_source_words(self) -> None:
+        words = [
+            {"word": "첫", "start": 0.0, "end": 0.5},
+            {"word": "번째", "start": 0.5, "end": 0.5},
+            {"word": "문장.", "start": 0.5, "end": 1.0},
+        ]
+
+        sentences = build_source_sentences(
+            [{"start": 0.0, "end": 1.0, "text": "첫 번째 문장.", "words": words}]
+        )
+
+        self.assertEqual(sentences[0]["source_words"], words)
+
     def test_safety_boundary_uses_the_nearest_word_pause(self) -> None:
         segments = [
             {
@@ -102,6 +115,64 @@ class TestSentenceFirstDelivery(unittest.TestCase):
         self.assertEqual([cue["text"] for cue in result.cues], ["你好。"])
         fit_repair.assert_not_called()
         align.assert_not_called()
+
+    def test_point_timed_word_is_allowed_inside_a_positive_cue(self) -> None:
+        result = build_delivery_cues(
+            [
+                {
+                    "start": 0.0,
+                    "end": 1.0,
+                    "text": "你好。",
+                    "source_words": [
+                        {"word": "안", "start": 0.0, "end": 0.5},
+                        {"word": "녕", "start": 0.5, "end": 0.5},
+                        {"word": "요", "start": 0.5, "end": 1.0},
+                    ],
+                    "source_word_indices": [0, 1, 2],
+                }
+            ],
+            profile=None,
+        )
+
+        self.assertFalse(result.blocked)
+
+    def test_tolerates_float_noise_at_a_contiguous_source_word_boundary(self) -> None:
+        sentences = build_source_sentences(
+            [
+                {
+                    "start": 0.0,
+                    "end": 1.0,
+                    "text": "안녕.",
+                    "words": [
+                        {"word": "안", "start": 0.0, "end": 0.30000000000000004},
+                        {"word": "녕.", "start": 0.3, "end": 1.0},
+                    ],
+                }
+            ]
+        )
+
+        result = build_delivery_cues([{**sentences[0], "text": "你好。"}], profile=None)
+
+        self.assertFalse(result.blocked)
+
+    def test_isolated_point_timed_word_remains_blocked(self) -> None:
+        result = build_delivery_cues(
+            [
+                {
+                    "start": 1.0,
+                    "end": 1.0,
+                    "text": "你好。",
+                    "source_words": [{"word": "안녕", "start": 1.0, "end": 1.0}],
+                    "source_word_indices": [0],
+                }
+            ],
+            profile=None,
+        )
+
+        self.assertTrue(result.blocked)
+        self.assertTrue(
+            any(diagnostic.code == "non_positive_duration" for diagnostic in result.diagnostics)
+        )
 
     def test_cps_repair_runs_before_alignment_and_rechecks_the_result(self) -> None:
         fit_repair = Mock(return_value="短句。")

@@ -159,11 +159,15 @@ def _word_entries(segments: List[Dict]) -> List[Dict[str, Any]]:
                 )
             start = _timestamp(word.get("start"), "start")
             end = _timestamp(word.get("end"), "end")
-            if end <= start:
+            if end < start and not math.isclose(end, start, abs_tol=1e-9):
                 raise SentenceFirstError(
-                    "Sentence-first delivery requires positive Source Word timing."
+                    "Sentence-first delivery requires non-negative Source Word timing."
                 )
-            if previous_end is not None and start < previous_end:
+            if (
+                previous_end is not None
+                and start < previous_end
+                and not math.isclose(start, previous_end, abs_tol=1e-9)
+            ):
                 raise SentenceFirstError(
                     "Sentence-first delivery requires ordered, non-overlapping Source Word timing."
                 )
@@ -322,7 +326,7 @@ def _sentence_words(sentence: Dict, sentence_index: int) -> tuple[List[Dict], Li
             )
         start = _timestamp(word.get("start"), "start")
         end = _timestamp(word.get("end"), "end")
-        if end <= start:
+        if end < start and not math.isclose(end, start, abs_tol=1e-9):
             raise SentenceFirstError(
                 f"Source Sentence {sentence_index} has invalid Source Word timing."
             )

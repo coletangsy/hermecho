@@ -170,15 +170,19 @@ def _validate_source_words(
                 "a Source Word has a negative timestamp",
             )
             return
-        if word_end <= word_start:
+        if word_end < word_start and not math.isclose(word_end, word_start, abs_tol=1e-9):
             _structural_diagnostic(
                 diagnostics,
                 cue_index,
                 "invalid_source_word_timing",
-                "a Source Word has non-positive timing",
+                "a Source Word has reversed timing",
             )
             return
-        if previous_end is not None and word_start < previous_end:
+        if (
+            previous_end is not None
+            and word_start < previous_end
+            and not math.isclose(word_start, previous_end, abs_tol=1e-9)
+        ):
             _structural_diagnostic(
                 diagnostics,
                 cue_index,
@@ -505,7 +509,11 @@ def _has_usable_word_timestamps(words: object) -> bool:
             or not math.isfinite(end)
             or start < 0
             or end <= start
-            or (previous_end is not None and start < previous_end)
+            or (
+                previous_end is not None
+                and start < previous_end
+                and not math.isclose(start, previous_end, abs_tol=1e-9)
+            )
         ):
             return False
         previous_end = end
