@@ -111,8 +111,6 @@ def _is_checkpoint_state(value: Any) -> bool:
     translation = value.get("translation")
     if translation is None:
         return True
-    if transcription is None:
-        return False
     if (
         not isinstance(translation, dict)
         or set(translation) != {"fingerprint", "chunks"}

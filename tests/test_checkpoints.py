@@ -63,6 +63,28 @@ class TestCheckpointStore(unittest.TestCase):
                 )
             )
 
+    def test_translation_checkpoint_without_local_transcription_is_reused(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_dir:
+            checkpoint_path = os.path.join(temporary_dir, "checkpoint.json")
+            with open(checkpoint_path, "w", encoding="utf-8") as checkpoint:
+                checkpoint.write(
+                    '{"version": 1, "translation": {"fingerprint": "translation", '
+                    '"chunks": {"0": {"status": "accepted", "fingerprint": "chunk", '
+                    '"translations": {"0": "accepted"}}}}}'
+                )
+
+            store = CheckpointStore(checkpoint_path)
+
+            self.assertEqual(
+                store.load_accepted_translation_chunk(
+                    "translation",
+                    0,
+                    "chunk",
+                    ["0"],
+                ),
+                {"0": "accepted"},
+            )
+
 
 if __name__ == "__main__":
     unittest.main()
