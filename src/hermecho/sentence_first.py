@@ -140,7 +140,7 @@ def _word_entries(segments: List[Dict]) -> List[Dict[str, Any]]:
         text = segment.get("text", "")
         if not isinstance(text, str):
             raise SentenceFirstError("Sentence-first delivery requires source text.")
-        if text.strip() == "[no speech]":
+        if not text.strip() or text.strip() == "[no speech]":
             continue
         words = segment.get("words")
         if not isinstance(words, list) or not words:

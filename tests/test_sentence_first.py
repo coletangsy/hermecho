@@ -44,6 +44,21 @@ class TestSourceSentences(unittest.TestCase):
         with self.assertRaisesRegex(SentenceFirstError, "Source Word timestamps"):
             build_source_sentences([{"start": 0.0, "end": 1.0, "text": "hello"}])
 
+    def test_ignores_empty_segments_without_word_evidence(self) -> None:
+        sentences = build_source_sentences(
+            [
+                {
+                    "start": 0.0,
+                    "end": 1.0,
+                    "text": "안녕.",
+                    "words": [{"word": "안녕.", "start": 0.0, "end": 1.0}],
+                },
+                {"start": 1.0, "end": 1.0, "text": "", "words": []},
+            ]
+        )
+
+        self.assertEqual([sentence["text"] for sentence in sentences], ["안녕."])
+
     def test_safety_boundary_uses_the_nearest_word_pause(self) -> None:
         segments = [
             {
