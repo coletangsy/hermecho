@@ -488,6 +488,30 @@ def _split_no_words(seg: Dict, max_chars: int, max_duration: float) -> List[Dict
     return result if result else [seg]
 
 
+def _has_usable_word_timestamps(words: object) -> bool:
+    if not isinstance(words, list) or not words:
+        return False
+    previous_end: Optional[float] = None
+    for word in words:
+        if not isinstance(word, dict):
+            return False
+        try:
+            start = float(word["start"])
+            end = float(word["end"])
+        except (KeyError, TypeError, ValueError):
+            return False
+        if (
+            not math.isfinite(start)
+            or not math.isfinite(end)
+            or start < 0
+            or end <= start
+            or (previous_end is not None and start < previous_end)
+        ):
+            return False
+        previous_end = end
+    return True
+
+
 def split_long_segments(segments: List[Dict], max_chars: int = 40, max_duration: float = 7.0) -> List[Dict]:
     """
     Splits segments that exceed ``max_chars`` or ``max_duration``.
@@ -498,18 +522,27 @@ def split_long_segments(segments: List[Dict], max_chars: int = 40, max_duration:
     """
     split_segments = []
 
-    for seg in segments:
-        text = seg.get("text", "").strip()
-        start = seg["start"]
-        end = seg["end"]
+    for source_segment in segments:
+        text = source_segment.get("text", "").strip()
+        try:
+            start = float(source_segment["start"])
+            end = float(source_segment["end"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        if not text or not math.isfinite(start) or not math.isfinite(end) or end <= start:
+            continue
+        seg = {**source_segment, "start": start, "end": end}
         duration = end - start
-        words = seg.get("words", [])
+        words = seg.get("words")
+        if words is not None and not _has_usable_word_timestamps(words):
+            seg.pop("words")
+            words = None
 
         if len(text) <= max_chars and duration <= max_duration:
             split_segments.append(seg)
             continue
 
-        if not words:
+        if words is None:
             split_segments.extend(_split_no_words(seg, max_chars, max_duration))
             continue
             
@@ -625,6 +658,7 @@ def adjust_subtitle_timing(
     for i in range(len(adjusted_segments) - 1):
         current_segment = adjusted_segments[i]
         next_segment = adjusted_segments[i + 1]
+        original_end = current_segment['end']
 
         # The ideal end time for the current segment is the start of the next one minus the buffer.
         new_end_time = next_segment['start'] - time_buffer
@@ -642,12 +676,9 @@ def adjust_subtitle_timing(
         # Update the end time. This extends shorter segments and shortens longer ones.
         current_segment['end'] = new_end_time
 
-        # Ensure that the new end time does not precede the start time.
-        if current_segment['end'] < current_segment['start']:
-            # This can happen if the gap between segments is smaller than the time_buffer.
-            # To avoid a negative or zero duration, we set the end time to be same as the start time,
-            # which will make the subtitle appear as a flash. This is a safe fallback.
-            current_segment['end'] = current_segment['start']
+        # Keep the source's positive duration when the requested buffer cannot fit.
+        if current_segment['end'] <= current_segment['start']:
+            current_segment['end'] = original_end
 
     # The last segment's end time is not modified as there's no next segment to overlap with.
 

@@ -438,16 +438,17 @@ class TestOpenRouterTranslation(unittest.TestCase):
             ["0"],
         )
 
-    def test_translate_segments_omits_no_speech_before_translation(self) -> None:
+    def test_translate_segments_omits_non_speech_before_translation(self) -> None:
         segments = [
             {"start": 0.0, "end": 1.0, "text": "first"},
             {"start": 1.0, "end": 2.0, "text": "[no speech]"},
-            {"start": 2.0, "end": 3.0, "text": "second"},
+            {"start": 2.0, "end": 3.0, "text": "  "},
+            {"start": 3.0, "end": 4.0, "text": "second"},
         ]
 
         with patch(
             "hermecho.translation._translate_chunk",
-            return_value=({"translations": {"0": "甲", "2": "乙"}}, None),
+            return_value=({"translations": {"0": "甲", "3": "乙"}}, None),
         ) as translate_chunk:
             translated = translate_segments(
                 segments,
@@ -459,7 +460,7 @@ class TestOpenRouterTranslation(unittest.TestCase):
         self.assertEqual([segment["text"] for segment in translated], ["甲", "乙"])
         self.assertEqual(
             [segment["_translation_id"] for segment in translate_chunk.call_args.args[0]],
-            ["0", "2"],
+            ["0", "3"],
         )
 
     def test_translate_segments_preserves_punctuation_for_all_delivery_profiles(self) -> None:

@@ -431,7 +431,7 @@ def translate_segments(
     translation_segments = [
         {**segment, "_translation_id": str(index)}
         for index, segment in enumerate(segments)
-        if segment.get("text", "").strip() != "[no speech]"
+        if (text := segment.get("text", "").strip()) and text != "[no speech]"
     ]
     num_segments = len(translation_segments)
 
@@ -590,7 +590,7 @@ def translate_segments(
         final_segments = []
         for i, segment in enumerate(segments):
             original_text = segment.get("text", "").strip()
-            if original_text == "[no speech]":
+            if not original_text or original_text == "[no speech]":
                 continue
             translated_text = translated_segments_text.get(str(i))
             if translated_text is None:

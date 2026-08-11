@@ -6,9 +6,11 @@ from unittest.mock import patch
 
 from hermecho.pipeline import PipelineConfig, process_video
 from hermecho.subtitles import (
+    adjust_subtitle_timing,
     apply_delivery_profile,
     delivery_gate_report,
     delivery_profile_for_orientation,
+    split_long_segments,
     visual_cell_count,
 )
 
@@ -37,6 +39,46 @@ class TestVisualCells(unittest.TestCase):
 
 
 class TestDeliveryProfiles(unittest.TestCase):
+    def test_split_uses_segment_timing_when_source_word_timing_is_invalid(self) -> None:
+        segments = [
+            {
+                "start": 0.0,
+                "end": 1.0,
+                "text": "valid",
+                "words": [{"word": "valid", "start": 0.0, "end": 1.0}],
+            },
+            {
+                "start": 1.0,
+                "end": 2.0,
+                "text": "fallback",
+                "words": [{"word": "fallback", "start": 1.5, "end": 1.5}],
+            },
+            {"start": 2.0, "end": 2.0, "text": "zero"},
+            {"start": 2.0, "end": 3.0, "text": "  "},
+        ]
+
+        cleaned = split_long_segments(segments)
+
+        self.assertEqual([segment["text"] for segment in cleaned], ["valid", "fallback"])
+        self.assertNotIn("words", cleaned[1])
+        self.assertFalse(
+            apply_delivery_profile(
+                cleaned,
+                delivery_profile_for_orientation(is_portrait=False),
+            ).blocked
+        )
+
+    def test_adjust_timing_keeps_original_duration_when_buffer_cannot_fit(self) -> None:
+        adjusted = adjust_subtitle_timing(
+            [
+                {"start": 0.0, "end": 0.1, "text": "first"},
+                {"start": 0.1, "end": 1.0, "text": "second"},
+            ],
+            time_buffer=0.1,
+        )
+
+        self.assertEqual(adjusted[0]["end"], 0.1)
+
     def test_portrait_and_landscape_use_independent_line_limits(self) -> None:
         portrait = delivery_profile_for_orientation(is_portrait=True)
         landscape = delivery_profile_for_orientation(is_portrait=False)
