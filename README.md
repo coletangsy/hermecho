@@ -12,7 +12,7 @@ Hermecho translates videos with Korean audio into Traditional Chinese (Taiwan) s
 - Subtitle styling controls for font, size, background box, margins, and ASS alignment.
 - `ffmpeg` subtitle-filter detection before burn-in.
 - Deterministic portrait and landscape Delivery Profiles measure subtitle width in Visual Cells and wrap to at most two lines. Every translated run writes a Delivery Gate report; presentation limits use Best-effort Delivery, while structural timing defects block final output.
-- Sentence-first delivery preserves Source Word timing, translates complete Source Sentences, and remains opt-in until an approved Phase 3 comparison promotes it through `auto`.
+- Sentence-first delivery preserves Source Word timing, translates complete Source Sentences, and is the default; `legacy` remains available as an explicit fallback.
 
 The current pipeline does not include multimodal transcription, transcription prompts, keyword extraction, or timing-review stages.
 
@@ -123,24 +123,22 @@ The full pipeline is:
 extract audio -> local Whisper transcription -> Source Sentences or legacy cues -> OpenRouter Translation Gate -> Delivery Gate -> SRT -> optional MP4 burn-in
 ```
 
-Sentence-first delivery can be selected explicitly while it is under review:
+Sentence-first delivery is the default after the approved Phase 3 review:
 
 ```bash
-hermecho clip.mp4 --subtitle-delivery sentence-first
+hermecho clip.mp4
 hermecho clip.mp4 --subtitle-delivery legacy
 ```
 
-`auto` is the default. It uses legacy delivery until a Phase 3 Comparison Run
-has a frozen transcript, passing Delivery Gates, a completed review checklist,
-and dated Human Approval. Run the fixed comparison with:
+`auto` (the default) uses sentence-first delivery. Run the fixed comparison to
+produce or audit the review evidence:
 
 ```bash
 python -m hermecho.sentence_first_comparison input/20251231_w-yGSP1c3bg.mp4
 ```
 
-The comparison writes `output/sentence-first-comparison/`. After human review,
-fill in `review.md` and set every Candidate-only regression to `no` before
-changing `Decision` to `approved`. Legacy remains available explicitly.
+The comparison writes `output/sentence-first-comparison/`. Its `review.md`
+records the human approval; legacy remains available explicitly.
 
 For translated runs, `--locked-terms-file` is required and defaults to
 `references/locked_terms.json`. It is a machine-readable JSON source-to-target
@@ -159,7 +157,7 @@ Run `hermecho --help` for the full list.
 | `video_filename` | File name inside `--input_dir`. |
 | `--model` | Whisper model size, default `large`. |
 | `--transcription-backend` | `auto`, `whisper`, or Apple-Silicon-only `mlx`. `auto` selects MLX only with approved faster local comparison evidence; otherwise it uses Whisper. MLX supports `large` / `large-v3` as large-v3. |
-| `--subtitle-delivery` | `auto`, `legacy`, or `sentence-first`. `auto` promotes sentence-first only after approved Phase 3 evidence; legacy is the pre-approval fallback. |
+| `--subtitle-delivery` | `auto`, `legacy`, or `sentence-first`. `auto` uses sentence-first; `legacy` is the explicit fallback. |
 | `--language` | Source audio language, auto-detected by default. |
 | `--target_language` | Translation target, default `Traditional Chinese (Taiwan)`. |
 | `--translation_model` | OpenRouter model slug, default `deepseek/deepseek-v4-pro`. |

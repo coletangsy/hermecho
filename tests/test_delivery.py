@@ -510,6 +510,7 @@ class TestDeliveryPipeline(unittest.TestCase):
             output_dir=output_dir,
             srt_only=True,
             stage_cooldown=0,
+            subtitle_delivery="legacy",
         )
         translated = [{"start": 0.0, "end": 1.0, "text": "甲" * 25}]
 
@@ -546,6 +547,7 @@ class TestDeliveryPipeline(unittest.TestCase):
             output_dir=output_dir,
             srt_only=True,
             stage_cooldown=0,
+            subtitle_delivery="legacy",
         )
         translated = [{"start": 0.0, "end": 0.0, "text": "甲"}]
 

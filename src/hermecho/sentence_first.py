@@ -106,14 +106,14 @@ def evidence_allows_sentence_first(evidence_dir: str | Path) -> bool:
     return all(fields.get(f"candidate-only {check}") == "no" for check in REVIEW_CHECKS)
 
 
-def resolve_subtitle_delivery(requested: str, evidence_dir: str | Path) -> str:
-    """Resolve the opt-in/default Phase 3 delivery mode."""
+def resolve_subtitle_delivery(requested: str) -> str:
+    """Resolve the promoted default delivery mode."""
     if requested == "sentence-first":
         return requested
     if requested == "legacy":
         return requested
     if requested == "auto":
-        return "sentence-first" if evidence_allows_sentence_first(evidence_dir) else "legacy"
+        return "sentence-first"
     raise ValueError(
         f"Unknown subtitle delivery '{requested}'. Choose auto, legacy, or sentence-first."
     )

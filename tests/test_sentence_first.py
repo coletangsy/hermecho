@@ -9,6 +9,7 @@ from hermecho.sentence_first import (
     SentenceFirstError,
     build_delivery_cues,
     build_source_sentences,
+    evidence_allows_sentence_first,
     resolve_subtitle_delivery,
 )
 
@@ -361,15 +362,14 @@ class TestSentenceFirstDelivery(unittest.TestCase):
 
 
 class TestSentenceFirstPromotion(unittest.TestCase):
-    def test_auto_uses_legacy_until_human_approval_then_promotes(self) -> None:
+    def test_auto_defaults_to_sentence_first_after_promotion(self) -> None:
+        self.assertEqual(resolve_subtitle_delivery("auto"), "sentence-first")
+        self.assertEqual(resolve_subtitle_delivery("legacy"), "legacy")
+        self.assertEqual(resolve_subtitle_delivery("sentence-first"), "sentence-first")
+
+    def test_approved_evidence_is_valid(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_dir:
             evidence_dir = Path(temporary_dir)
-            self.assertEqual(resolve_subtitle_delivery("auto", evidence_dir), "legacy")
-            self.assertEqual(resolve_subtitle_delivery("legacy", evidence_dir), "legacy")
-            self.assertEqual(
-                resolve_subtitle_delivery("sentence-first", evidence_dir),
-                "sentence-first",
-            )
             for name in (
                 "manifest.json",
                 "review_composite.mp4",
@@ -437,7 +437,7 @@ class TestSentenceFirstPromotion(unittest.TestCase):
                 encoding="utf-8",
             )
 
-            self.assertEqual(resolve_subtitle_delivery("auto", evidence_dir), "sentence-first")
+            self.assertTrue(evidence_allows_sentence_first(evidence_dir))
 
 
 if __name__ == "__main__":

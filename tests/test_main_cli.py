@@ -141,6 +141,7 @@ class TestPipelineOrchestration(unittest.TestCase):
             output_dir=tempfile.mkdtemp(),
             language="ko",
             stage_cooldown=0,
+            subtitle_delivery="legacy",
         )
         transcribed = [{"start": 0.0, "end": 1.0, "text": "hello"}]
 
@@ -198,6 +199,7 @@ class TestPipelineOrchestration(unittest.TestCase):
                         save_source_transcript=mode == "save_source_transcript",
                         language="ko",
                         stage_cooldown=0,
+                        subtitle_delivery="legacy",
                     )
                     with patch("hermecho.pipeline.extract_audio", return_value=audio_path), \
                         patch("hermecho.pipeline.transcribe_audio", return_value=transcribed), \
@@ -243,6 +245,7 @@ class TestPipelineOrchestration(unittest.TestCase):
             language="ko",
             srt_only=True,
             stage_cooldown=0,
+            subtitle_delivery="legacy",
         )
 
         try:
@@ -287,6 +290,7 @@ class TestPipelineOrchestration(unittest.TestCase):
                             language="ko",
                             locked_terms_file=locked_terms_path,
                             stage_cooldown=0,
+                            subtitle_delivery="legacy",
                         )
                         with patch("hermecho.pipeline.extract_audio", return_value=audio_path), \
                             patch(
@@ -322,6 +326,7 @@ class TestPipelineOrchestration(unittest.TestCase):
             language="ko",
             locked_terms_file=locked_terms_path,
             stage_cooldown=0,
+            subtitle_delivery="legacy",
         )
 
         try:
@@ -391,6 +396,7 @@ class TestPipelineOrchestration(unittest.TestCase):
             language="ko",
             fonts_dir="/tmp/pingfang",
             stage_cooldown=0,
+            subtitle_delivery="legacy",
         )
         translated = [
             {
@@ -483,7 +489,7 @@ class TestPipelineOrchestration(unittest.TestCase):
         )
         self.assertTrue(translate.call_args.kwargs["preserve_punctuation"])
 
-    def test_default_pipeline_transcribes_with_whisper_and_adjusts_timing(self) -> None:
+    def test_legacy_pipeline_transcribes_with_whisper_and_adjusts_timing(self) -> None:
         with tempfile.NamedTemporaryFile(suffix=".mp3", delete=False) as tmp:
             audio_path = tmp.name
             tmp.write(b"fake")
@@ -510,6 +516,7 @@ class TestPipelineOrchestration(unittest.TestCase):
             margin_h=10,
             alignment=2,
             stage_cooldown=0,
+            subtitle_delivery="legacy",
         )
         transcribed = [{"start": 0.0, "end": 1.0, "text": "hello"}]
         translated = [{"start": 0.0, "end": 1.0, "text": "你好，世界。"}]
@@ -654,6 +661,7 @@ class TestPipelineOrchestration(unittest.TestCase):
             margin_h=10,
             alignment=2,
             stage_cooldown=0,
+            subtitle_delivery="legacy",
         )
         transcribed = [{"start": 0.0, "end": 1.0, "text": "hello"}]
         translated = [{"start": 0.0, "end": 1.0, "text": "你好"}]
@@ -689,6 +697,7 @@ class TestPipelineOrchestration(unittest.TestCase):
             transcription_backend="whisper",
             srt_only=True,
             stage_cooldown=0,
+            subtitle_delivery="legacy",
         )
         requests = []
         interrupted = False
@@ -740,6 +749,7 @@ class TestPipelineOrchestration(unittest.TestCase):
             transcription_backend="whisper",
             srt_only=True,
             stage_cooldown=0,
+            subtitle_delivery="legacy",
         )
 
         try:
@@ -774,6 +784,7 @@ class TestPipelineOrchestration(unittest.TestCase):
             transcription_backend="whisper",
             srt_only=True,
             stage_cooldown=0,
+            subtitle_delivery="legacy",
         )
 
         try:
@@ -811,6 +822,7 @@ class TestPipelineOrchestration(unittest.TestCase):
             transcription_backend="whisper",
             srt_only=True,
             stage_cooldown=0,
+            subtitle_delivery="legacy",
         )
         force_config = PipelineConfig(**{**base_config.__dict__, "force": True})
 

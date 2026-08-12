@@ -47,8 +47,8 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
         choices=("auto", "legacy", "sentence-first"),
         default="auto",
         help=(
-            "Subtitle delivery mode; auto promotes sentence-first only after "
-            "approved Phase 3 evidence, otherwise uses legacy."
+            "Subtitle delivery mode; auto defaults to sentence-first. "
+            "Use legacy for the explicit fallback."
         ),
     )
     parser.add_argument(

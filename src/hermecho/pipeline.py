@@ -103,10 +103,7 @@ def _load_transcription_artifact(path: str) -> list[dict]:
 def process_video(config: PipelineConfig) -> None:
     """Run the configured Hermecho video translation pipeline."""
     comparison_evidence_dir = os.path.join(config.output_dir, "asr-comparison")
-    subtitle_delivery = resolve_subtitle_delivery(
-        config.subtitle_delivery,
-        os.path.join(config.output_dir, "sentence-first-comparison"),
-    )
+    subtitle_delivery = resolve_subtitle_delivery(config.subtitle_delivery)
     transcription_backend = resolve_transcription_backend(
         config.transcription_backend,
         config.model,
