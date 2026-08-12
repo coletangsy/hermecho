@@ -226,7 +226,7 @@ def _source_sentence(entries: List[Dict[str, Any]], indices: List[int]) -> Dict:
         ):
             text_parts.append(entry["segment_text"].strip())
         elif not text_parts or text_parts[-1] != entry["segment_text"].strip():
-            text_parts.append(entry["word"]["word"].strip())
+            text_parts.append(entry["word"]["word"])
     text = ""
     for part in text_parts:
         if not part:
@@ -240,6 +240,7 @@ def _source_sentence(entries: List[Dict[str, Any]], indices: List[int]) -> Dict:
         ):
             text += " "
         text += part
+    text = text.strip()
     if not text:
         text = "".join(word["word"] for word in source_words).strip()
     return {

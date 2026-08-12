@@ -4,6 +4,7 @@ from pathlib import Path
 import unittest
 from unittest.mock import patch
 
+from hermecho import cli
 from hermecho.sentence_first_comparison import ComparisonConfig, main, run_comparison
 from hermecho.sentence_first import evidence_allows_sentence_first
 
@@ -146,6 +147,7 @@ class TestSentenceFirstComparison(unittest.TestCase):
             output_dir = root / "comparison"
             audio_path = root / "audio.mp3"
             audio_path.write_bytes(b"audio")
+            process_configs = []
             transcription = [
                 {
                     "start": 0.0,
@@ -159,6 +161,7 @@ class TestSentenceFirstComparison(unittest.TestCase):
                 target.write_bytes(b"range")
 
             def fake_process(config) -> None:
+                process_configs.append(config)
                 run_dir = Path(config.output_dir) / config.video_filename.removesuffix(".mp4")
                 run_dir.mkdir(parents=True)
                 (run_dir / f"{config.subtitle_delivery}_transcript_source.srt").write_text(
@@ -214,6 +217,15 @@ class TestSentenceFirstComparison(unittest.TestCase):
             self.assertTrue((output_dir / "review.md").is_file())
             self.assertFalse(evidence_allows_sentence_first(output_dir))
             self.assertFalse(audio_path.exists())
+            default_fonts_dir = cli.parse_args(["clip.mp4"]).fonts_dir
+            self.assertTrue(process_configs)
+            self.assertTrue(
+                all(config.fonts_dir == default_fonts_dir for config in process_configs)
+            )
+            self.assertEqual(
+                report["shared"]["subtitle_style"]["fonts_dir"],
+                default_fonts_dir,
+            )
 
 
 if __name__ == "__main__":

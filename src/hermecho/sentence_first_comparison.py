@@ -13,7 +13,11 @@ from typing import Optional, Sequence
 
 from dotenv import load_dotenv
 
-from .asr_comparison import _extract_review_range, _write_review_composite
+from .asr_comparison import (
+    _effective_cli_style,
+    _extract_review_range,
+    _write_review_composite,
+)
 from .checkpoints import fingerprint_data
 from .sentence_first import REVIEW_CHECKS, SentenceFirstError, build_source_sentences
 
@@ -219,6 +223,7 @@ def run_comparison(config: ComparisonConfig) -> Path:
             "Comparison requires an ffmpeg build with the `subtitles` filter "
             "(libass support) before it starts."
         )
+    fonts_dir, _ = _effective_cli_style(config)
     config.output_dir.mkdir(parents=True, exist_ok=True)
 
     range_path = config.output_dir / "media_range.mp4"
@@ -298,7 +303,7 @@ def run_comparison(config: ComparisonConfig) -> Path:
                 reference_file=str(config.reference_file),
                 locked_terms_file=str(config.locked_terms_file),
                 font_name=config.font_name,
-                fonts_dir=config.fonts_dir,
+                fonts_dir=fonts_dir,
                 font_size=config.font_size,
                 outline_width=config.outline_width,
                 box_background=config.box_background,
@@ -351,7 +356,7 @@ def run_comparison(config: ComparisonConfig) -> Path:
             },
             "subtitle_style": {
                 "font_name": config.font_name,
-                "fonts_dir": config.fonts_dir,
+                "fonts_dir": fonts_dir,
                 "font_size": config.font_size,
                 "outline_width": config.outline_width,
                 "box_background": config.box_background,
@@ -372,7 +377,7 @@ def run_comparison(config: ComparisonConfig) -> Path:
                 "locked_terms_file": str(config.locked_terms_file),
                 "time_buffer": config.time_buffer,
                 "font_name": config.font_name,
-                "fonts_dir": config.fonts_dir,
+                "fonts_dir": fonts_dir,
                 "font_size": config.font_size,
                 "outline_width": config.outline_width,
                 "box_background": config.box_background,

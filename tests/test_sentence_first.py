@@ -73,6 +73,28 @@ class TestSourceSentences(unittest.TestCase):
 
         self.assertEqual(sentences[0]["source_words"], words)
 
+    def test_preserves_word_spacing_when_one_segment_contains_two_sentences(self) -> None:
+        sentences = build_source_sentences(
+            [
+                {
+                    "start": 0.0,
+                    "end": 2.0,
+                    "text": "첫 문장. 다음 문장.",
+                    "words": [
+                        {"word": "첫", "start": 0.0, "end": 0.4},
+                        {"word": " 문장.", "start": 0.4, "end": 0.9},
+                        {"word": " 다음", "start": 1.0, "end": 1.4},
+                        {"word": " 문장.", "start": 1.4, "end": 2.0},
+                    ],
+                }
+            ]
+        )
+
+        self.assertEqual(
+            [sentence["text"] for sentence in sentences],
+            ["첫 문장.", "다음 문장."],
+        )
+
     def test_safety_boundary_uses_the_nearest_word_pause(self) -> None:
         segments = [
             {
