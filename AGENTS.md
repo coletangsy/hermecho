@@ -9,6 +9,7 @@
 - Shared helpers live in `prompts.py`, `progress.py`, and `utils.py`.
 - Tests live in `tests/` (notably `test_main_cli.py`, `test_transcription.py`, `test_translation.py`, and `test_video_processing.py`).
 - Runtime folders: `input/` for source media, `output/` for generated artifacts, and `references/` for glossary/context files.
+- Use `.agents/skills/run-hermecho-job/` for Hermecho runtime jobs; its user-facing commands remain in `README.md`.
 - Local design notes and implementation plans may live under `docs/`, but `docs/` is ignored and not tracked in Git. Put durable setup, workflow, or operational guidance in `README.md` or `AGENTS.md`.
 
 ## Build, Test, and Development Commands

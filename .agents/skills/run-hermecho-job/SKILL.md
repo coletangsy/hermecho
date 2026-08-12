@@ -20,20 +20,22 @@ Use `README.md` and each command's `--help` as the current source of truth for f
 ## Preflight
 
 1. Work from the Hermecho repository root. Read `AGENTS.md`, `README.md`, and the relevant request or plan; run `git status --short --branch` without altering tracked files.
-2. Resolve the exact input file, mode, requested flags, output directory, and expected artifacts. Ask only when one of these materially changes the job.
-3. Run `conda run -n hermecho hermecho --help`. If the environment or package is unavailable, report the exact failure and stop; do not install or upgrade dependencies without approval.
-4. Confirm `ffmpeg` is available. For burn-in and Comparison Runs, also confirm the `subtitles` filter is present.
-5. For translated runs, confirm `OPENROUTER_API_KEY` is available without printing its value, and confirm the Locked Terms file exists and is a valid JSON object. Keep the reference file separate from Locked Terms.
-6. Confirm the output parent is writable and has reasonable free space. A Comparison Run requires an empty output directory; never delete or overwrite an existing comparison directory without explicit permission.
+2. Resolve the exact input file, mode, requested flags, output directory, and expected artifacts. Require the input to exist as a readable regular file. Ask only when one of these materially changes the job.
+3. Run the selected command's `--help` inside the `hermecho` Conda environment. If the environment, package, or selected module is unavailable, report the exact failure and stop; do not install or upgrade dependencies without approval.
+4. Before an ASR Comparison Run or any standard or sentence-first command that explicitly selects `--transcription-backend mlx`, require Apple Silicon and use Hermecho's `validate_mlx_backend` check for the selected model. Report its actionable error and stop when MLX cannot run.
+5. Confirm `ffmpeg` is available. For burn-in and Comparison Runs, also confirm the `subtitles` filter is present.
+6. For translated runs, confirm `OPENROUTER_API_KEY` is available without printing its value, and confirm the Locked Terms file exists and is a valid JSON object. Keep the reference file separate from Locked Terms.
+7. Confirm the output parent is writable and has reasonable free space. Require an empty output directory for a Comparison Run; never delete or overwrite an existing comparison directory without explicit permission.
 
 ## Run and monitor
 
 1. Show the resolved command before starting it. Preserve the exact command for retry or handoff.
 2. Start one process in a persistent execution session and monitor that session. Never launch a duplicate because output is temporarily quiet.
 3. Report meaningful stage transitions and keep the user updated during long stages. Avoid busy polling.
-4. On interruption or retry, run the same command. Let Hermecho reuse its matching transcription and Translation-Gate-approved chunk checkpoints.
-5. Do not add `--force` unless the user explicitly requests a full recomputation or evidence shows checkpoint reuse itself is the problem. Explain the lost work before using it.
-6. On failure, record the exit status, last completed stage, exact error, checkpoint path, and artifacts already written. Diagnose that stage before retrying; do not restart blindly.
+4. On interruption or retry of a standard pipeline, run the same command. Let Hermecho reuse its matching transcription and Translation-Gate-approved chunk checkpoints.
+5. Treat Comparison Runs as non-resumable. Preserve a failed run's non-empty output for diagnosis; after approval, rerun the full comparison with a new empty `--output-dir` instead of deleting or reusing partial evidence.
+6. Do not add `--force` unless the user explicitly requests a full recomputation or evidence shows checkpoint reuse itself is the problem. Explain the lost work before using it.
+7. On failure, record the exit status, last completed stage, exact error, checkpoint path when applicable, and artifacts already written. Diagnose that stage before retrying; do not restart blindly.
 
 ## Verify a standard run
 
@@ -42,7 +44,7 @@ Compare the output inventory from before and after the run; do not select an art
 - Transcribe-only: require a non-empty `*_transcript.srt`.
 - SRT-only: require a non-empty `*_subtitles.srt` and matching `*_delivery_gate.txt`.
 - Full pipeline: require those translated artifacts plus a non-empty `*_translated.mp4` that `ffprobe` can read.
-- Translated runs: read the Delivery Gate report. Structural Defects or a blocked Translation Gate mean failure; report Warnings and unresolved Repair Limits even when Best-effort Delivery produced files.
+- Translated runs: read the Delivery Gate report. Treat Structural Defects or a blocked Translation Gate as failure; report Warnings and unresolved Repair Limits even when Best-effort Delivery produced files.
 - Confirm the expected `.hermecho-checkpoint.json` exists when the run created reusable progress.
 
 ## Verify a Comparison Run
@@ -54,4 +56,4 @@ Compare the output inventory from before and after the run; do not select an art
 
 ## Finish
 
-Report the command, mode, elapsed result when available, reused checkpoints, Delivery Gate status, artifact paths, and anything still requiring human review. Leave `output/`, credentials, source media, and tracked repository files uncommitted and unchanged.
+Report the command, mode, elapsed result when available, reused checkpoints, Delivery Gate status, artifact paths, and anything still requiring human review. Leave generated output uncommitted. Leave credentials, source media, and tracked repository files unchanged.
