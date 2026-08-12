@@ -1,0 +1,4 @@
+interface:
+  display_name: "Run Hermecho Job"
+  short_description: "Run, resume, and verify Hermecho media jobs"
+  default_prompt: "Use $run-hermecho-job to run this Hermecho job, resume safely if interrupted, and verify its outputs."
