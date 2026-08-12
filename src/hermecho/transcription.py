@@ -1,8 +1,158 @@
 """
-Local Whisper transcription.
+Local Whisper transcription with an optional MLX backend.
 """
+import importlib.util
 import os
-from typing import Dict, List, Optional
+import platform
+from pathlib import Path
+from typing import Any, Dict, List, Optional
+
+from .asr_comparison import DEFAULT_EVIDENCE_DIR, evidence_allows_mlx
+
+
+MLX_LARGE_V3_MODEL = "mlx-community/whisper-large-v3-mlx"
+MLX_MODEL_NAMES = {
+    "large": MLX_LARGE_V3_MODEL,
+    "large-v3": MLX_LARGE_V3_MODEL,
+}
+
+
+def _mlx_model_path(model: str) -> str:
+    """Prefer the existing local Hugging Face snapshot over a network lookup."""
+    model_repo = MLX_MODEL_NAMES[model]
+    try:
+        from huggingface_hub import try_to_load_from_cache
+    except ImportError:
+        return model_repo
+    cached_config = try_to_load_from_cache(
+        repo_id=model_repo,
+        filename="config.json",
+    )
+    if isinstance(cached_config, str):
+        snapshot_dir = Path(cached_config).parent
+        if any(
+            (snapshot_dir / filename).exists()
+            for filename in ("weights.safetensors", "weights.npz")
+        ):
+            return str(snapshot_dir)
+    return model_repo
+
+
+def validate_mlx_backend(model: str) -> Optional[str]:
+    """Return an actionable error when MLX cannot run with this model."""
+    if platform.system() != "Darwin" or platform.machine() not in {"arm64", "arm64e"}:
+        return (
+            "MLX Whisper requires Apple Silicon. "
+            "Use --transcription-backend whisper on this machine."
+        )
+    if model not in MLX_MODEL_NAMES:
+        return (
+            "MLX Whisper supports only large-v3. "
+            "Use --model large or --model large-v3."
+        )
+    if importlib.util.find_spec("mlx_whisper") is None:
+        return 'MLX Whisper is not installed. Install it with `python -m pip install -e ".[mlx]"`.'
+    return None
+
+
+def resolve_transcription_backend(
+    requested_backend: str,
+    model: str,
+    comparison_evidence_dir: str | Path | None = None,
+) -> str:
+    """Resolve ``auto`` only after supported MLX has approved faster evidence."""
+    if requested_backend != "auto":
+        return requested_backend
+    evidence_dir = DEFAULT_EVIDENCE_DIR if comparison_evidence_dir is None else comparison_evidence_dir
+    if validate_mlx_backend(model) is None and evidence_allows_mlx(evidence_dir, model=model):
+        return "mlx"
+    return "whisper"
+
+
+def _normalise_mlx_result(result: Any) -> tuple[str, List[Dict]]:
+    """Return MLX segments in the existing Whisper segment and word schema."""
+    if not isinstance(result, dict) or not isinstance(result.get("segments"), list):
+        raise RuntimeError("MLX Whisper returned an invalid transcription result.")
+
+    detected_language = result.get("language", "unknown")
+    if not isinstance(detected_language, str):
+        raise RuntimeError("MLX Whisper returned an invalid detected language.")
+
+    normalised_segments: List[Dict] = []
+    for segment in result["segments"]:
+        text = segment.get("text") if isinstance(segment, dict) else None
+        words = segment.get("words") if isinstance(segment, dict) else None
+        if (
+            not isinstance(segment, dict)
+            or not isinstance(text, str)
+            or not isinstance(words, list)
+        ):
+            raise RuntimeError("MLX Whisper returned an invalid transcription segment.")
+        if not text.strip() and not words:
+            continue
+        if not all(
+            isinstance(word, dict) and isinstance(word.get("word"), str)
+            for word in words
+        ):
+            raise RuntimeError("MLX Whisper returned an invalid Source Word timestamp.")
+        try:
+            normalised_segment = dict(segment)
+            normalised_segment["start"] = float(segment["start"])
+            normalised_segment["end"] = float(segment["end"])
+            normalised_segment["text"] = text
+            normalised_segment["words"] = [
+                {
+                    **word,
+                    "word": word["word"],
+                    "start": float(word["start"]),
+                    "end": float(word["end"]),
+                }
+                for word in words
+            ]
+        except (KeyError, TypeError, ValueError) as error:
+            raise RuntimeError("MLX Whisper returned invalid segment timestamps.") from error
+
+        normalised_segments.append(normalised_segment)
+
+    return detected_language, normalised_segments
+
+
+def _transcribe_with_mlx(
+    audio_path: str,
+    model: str,
+    language: Optional[str],
+    temperature: float,
+) -> List[Dict]:
+    error = validate_mlx_backend(model)
+    if error:
+        raise RuntimeError(error)
+
+    import mlx_whisper  # type: ignore
+
+    mlx_model = _mlx_model_path(model)
+
+    print(f"Loading MLX Whisper model from {mlx_model}...")
+    result = mlx_whisper.transcribe(  # type: ignore
+        audio_path,
+        path_or_hf_repo=mlx_model,
+        language=language,
+        word_timestamps=True,
+        verbose=True,
+        temperature=temperature,
+        condition_on_previous_text=False,
+        no_speech_threshold=0.85,
+        compression_ratio_threshold=1.7,
+    )
+    detected_language, segments = _normalise_mlx_result(result)
+    if not segments:
+        print("Warning: MLX Whisper returned no transcription segments.")
+        print(f"  - Detected language: {detected_language}")
+        return []
+
+    print(f"MLX Whisper detected language: {detected_language}")
+    print("Audio transcribed successfully")
+    print("Transcription: MLX Whisper (no API token usage).")
+    return segments
 
 
 def transcribe_audio(
@@ -10,13 +160,24 @@ def transcribe_audio(
     model: str,
     language: Optional[str],
     temperature: float = 0.0,
+    backend: str = "auto",
 ) -> Optional[List[Dict]]:
     """
-    Transcribes audio using the local OpenAI Whisper model.
+    Transcribes audio using the selected local Whisper backend.
     """
     try:
         if not os.path.exists(audio_path):
             print(f"Error: Audio file not found at {audio_path}")
+            return None
+
+        selected_backend = resolve_transcription_backend(backend, model)
+        if selected_backend == "mlx":
+            return _transcribe_with_mlx(audio_path, model, language, temperature)
+        if selected_backend != "whisper":
+            print(
+                "Error: Unknown transcription backend "
+                f"'{backend}'. Choose auto, whisper, or mlx."
+            )
             return None
 
         import whisper  # type: ignore

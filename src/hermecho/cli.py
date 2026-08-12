@@ -37,6 +37,21 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     )
     parser.add_argument("--model", default="large", help="The Whisper model for transcription.")
     parser.add_argument(
+        "--transcription-backend",
+        choices=("auto", "whisper", "mlx"),
+        default="auto",
+        help="Transcription runtime; auto uses MLX only with approved faster comparison evidence, otherwise portable Whisper. MLX requires Apple Silicon and .[mlx].",
+    )
+    parser.add_argument(
+        "--subtitle-delivery",
+        choices=("auto", "legacy", "sentence-first"),
+        default="auto",
+        help=(
+            "Subtitle delivery mode; auto defaults to sentence-first. "
+            "Use legacy for the explicit fallback."
+        ),
+    )
+    parser.add_argument(
         "--language",
         default=None,
         help="The language of the audio for transcription (default: auto-detect).",
@@ -55,6 +70,14 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser.add_argument("--input_dir", default="input", help="The directory where the input video is located.")
     parser.add_argument("--output_dir", default="output", help="The directory where the output files will be saved.")
     parser.add_argument("--reference_file", default="references/tripleS.md", help="Optional path to a reference file.")
+    parser.add_argument(
+        "--locked-terms-file",
+        default="references/locked_terms.json",
+        help=(
+            "Required JSON source-to-target Locked Terms mapping for translated runs "
+            "(default: references/locked_terms.json)."
+        ),
+    )
     parser.add_argument("--temperature", type=float, default=0.0, help="Whisper sampling temperature.")
     parser.add_argument("--font_name", default="Heiti TC", help="Font name for subtitles.")
     parser.add_argument(
@@ -84,6 +107,11 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
         type=int,
         default=60,
         help="Seconds to wait between pipeline stages to avoid API 503 errors.",
+    )
+    parser.add_argument(
+        "--force",
+        action="store_true",
+        help="Recompute all stages instead of reusing completed checkpoints.",
     )
     return parser.parse_args(argv)
 

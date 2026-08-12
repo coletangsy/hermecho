@@ -6,11 +6,13 @@ Hermecho translates videos with Korean audio into Traditional Chinese (Taiwan) s
 
 - Local Whisper transcription with no transcription API usage.
 - OpenRouter translation with reference-file context for names and terms.
+- Translation Gate rejects incomplete model responses and enforces JSON Locked Terms.
 - Segment guardrails for long subtitles, transcription gaps, and post-translation timing buffers.
 - SRT-only, transcribe-only, and full burn-in modes.
 - Subtitle styling controls for font, size, background box, margins, and ASS alignment.
 - `ffmpeg` subtitle-filter detection before burn-in.
-- Landscape and portrait video output; displayed orientation accounts for rotation metadata. Portrait cues are limited to two 12-character lines, while landscape behavior is unchanged.
+- Deterministic portrait and landscape Delivery Profiles measure subtitle width in Visual Cells and wrap to at most two lines. Every translated run writes a Delivery Gate report; presentation limits use Best-effort Delivery, while structural timing defects block final output.
+- Sentence-first delivery preserves Source Word timing, translates complete Source Sentences, and is the default; `legacy` remains available as an explicit fallback.
 
 The current pipeline does not include multimodal transcription, transcription prompts, keyword extraction, or timing-review stages.
 
@@ -37,6 +39,28 @@ conda run -n hermecho python -m pip install -e ".[dev]"
 conda run -n hermecho python --version
 ```
 
+On Apple Silicon, install the optional MLX Whisper runtime to try the large-v3
+candidate backend:
+
+```bash
+python -m pip install -e ".[mlx]"
+```
+
+MLX model weights download on first use, then reuse the local Hugging Face
+snapshot on later runs. `auto` keeps portable Whisper unless
+local Comparison Run evidence records a faster MLX median and explicit Human
+Approval with no Candidate-only regression.
+
+Create that evidence with the fixed ten-minute review range:
+
+```bash
+python -m hermecho.asr_comparison input/20251231_w-yGSP1c3bg.mp4 --language ko
+```
+
+It writes manifests, timings, a source-transcript diff, a shared-audio Review
+Composite, and `output/asr-comparison/review.md`. A reviewer must complete its
+checklist and mark the decision `approved` before `auto` can select MLX.
+
 `requirements.txt` is kept for compatibility and installs the editable package:
 
 ```bash
@@ -58,6 +82,19 @@ Check `ffmpeg` subtitle support:
 ```bash
 ffmpeg -hide_banner -filters | rg subtitles
 ```
+
+The standard Homebrew `ffmpeg` formula does not include libass. To replace it
+with the libass-enabled `homebrew-ffmpeg` build, run:
+
+```bash
+brew uninstall ffmpeg
+brew trust homebrew-ffmpeg/ffmpeg
+brew tap homebrew-ffmpeg/ffmpeg
+brew install homebrew-ffmpeg/ffmpeg/ffmpeg
+```
+
+This trusts a third-party tap and replaces Homebrew's core `ffmpeg`. It is
+required for hard-burned subtitles and Review Composites.
 
 ## Usage
 
@@ -83,8 +120,33 @@ hermecho clip.mp4 --input_dir ./videos --output_dir ./exports
 The full pipeline is:
 
 ```text
-extract audio -> local Whisper transcription -> split/fill segments -> OpenRouter translation -> timing adjustment -> SRT -> optional MP4 burn-in
+extract audio -> local Whisper transcription -> Source Sentences or legacy cues -> OpenRouter Translation Gate -> Delivery Gate -> SRT -> optional MP4 burn-in
 ```
+
+Sentence-first delivery is the default after the approved Phase 3 review:
+
+```bash
+hermecho clip.mp4
+hermecho clip.mp4 --subtitle-delivery legacy
+```
+
+`auto` (the default) uses sentence-first delivery. Run the fixed comparison to
+produce or audit the review evidence:
+
+```bash
+python -m hermecho.sentence_first_comparison input/20251231_w-yGSP1c3bg.mp4
+```
+
+The comparison writes `output/sentence-first-comparison/`. Its `review.md`
+records the human approval; legacy remains available explicitly.
+
+For translated runs, `--locked-terms-file` is required and defaults to
+`references/locked_terms.json`. It is a machine-readable JSON source-to-target
+mapping enforced by the Translation Gate; a missing or invalid mapping blocks
+translation and final SRT/MP4 delivery. `--reference_file` remains separate
+Markdown prompt context. Accepted translations preserve punctuation for both
+landscape and portrait delivery; portrait processing may wrap or split cues but
+does not remove accepted punctuation.
 
 ## Options
 
@@ -94,10 +156,13 @@ Run `hermecho --help` for the full list.
 | --- | --- |
 | `video_filename` | File name inside `--input_dir`. |
 | `--model` | Whisper model size, default `large`. |
+| `--transcription-backend` | `auto`, `whisper`, or Apple-Silicon-only `mlx`. `auto` selects MLX only with approved faster local comparison evidence; otherwise it uses Whisper. MLX supports `large` / `large-v3` as large-v3. |
+| `--subtitle-delivery` | `auto`, `legacy`, or `sentence-first`. `auto` uses sentence-first; `legacy` is the explicit fallback. |
 | `--language` | Source audio language, auto-detected by default. |
 | `--target_language` | Translation target, default `Traditional Chinese (Taiwan)`. |
 | `--translation_model` | OpenRouter model slug, default `deepseek/deepseek-v4-pro`. |
 | `--reference_file` | Translation reference material, default `references/tripleS.md`. |
+| `--locked-terms-file` | Required JSON source-to-target mapping for translated runs; defaults to `references/locked_terms.json`. Missing or invalid mappings block translation and final SRT/MP4 delivery. |
 | `--temperature` | Whisper sampling temperature, default `0.0`. |
 | `--time_buffer` | Seconds between subtitle cues after timing adjustment. |
 | `--transcribe-only` | Write source-language SRT and stop. |
@@ -107,12 +172,13 @@ Run `hermecho --help` for the full list.
 | `--fonts-dir` | Font directory for FFmpeg; defaults to the macOS MobileAsset font directory. |
 | `--margin_v`, `--margin_h`, `--alignment` | Burn-in subtitle placement. |
 | `--stage-cooldown` | Delay between stages, default `60`; use `0` to disable. |
+| `--force` | Recompute all stages instead of reusing completed checkpoints. |
 
-Outputs are written under `output/<video_basename>/` with a `YYYYMMDD_HHMMSS` timestamp.
+Outputs are written under `output/<video_basename>/` with a `YYYYMMDD_HHMMSS` timestamp. Each video also keeps one versioned, atomic `.hermecho-checkpoint.json`: matching completed transcription and Translation-Gate-approved chunks resume automatically; `--force` bypasses it. Translated runs also write a matching `*_delivery_gate.txt` report with any presentation warnings, Repair Limits, or Structural Defects.
 
 ## Hermecho Cloud rollout
 
-Before deploying Hermecho Cloud changes that accept portrait jobs, install the compatible Hermecho release on the processor Mac. The pipeline owns the portrait subtitle cue limit used by both SRT and burned-in MP4 output.
+Before deploying Hermecho Cloud changes that accept portrait jobs, install the compatible Hermecho release on the processor Mac. The pipeline owns the orientation-specific Delivery Profile used by both SRT and burned-in MP4 output.
 
 ## Development
 
@@ -124,6 +190,8 @@ src/
 └── hermecho/
     ├── cli.py
     ├── pipeline.py
+    ├── sentence_first.py
+    ├── sentence_first_comparison.py
     ├── transcription.py
     ├── translation.py
     ├── prompts.py

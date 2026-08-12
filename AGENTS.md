@@ -63,3 +63,17 @@ On macOS, use the default `Heiti TC` font for burn-in; `PingFang TC` may render 
 ## Security & Configuration Tips
 - Keep secrets in `.env` only (`OPENROUTER_API_KEY`); never commit keys.
 - Avoid committing large generated artifacts under `output/` unless explicitly required for review.
+
+## Agent skills
+
+### Issue tracker
+
+Issues and specs are tracked in GitHub Issues for `coletangsy/hermecho`. See `docs/agents/issue-tracker.md`.
+
+### Triage labels
+
+Use the canonical triage roles `needs-triage`, `needs-info`, `ready-for-agent`, `ready-for-human`, and `wontfix`. See `docs/agents/triage-labels.md`.
+
+### Domain docs
+
+This is a single-context repository with a root `CONTEXT.md` and system-wide ADRs under `docs/adr/`. See `docs/agents/domain.md`.

@@ -1,6 +1,7 @@
 """End-to-end video translation pipeline orchestration."""
 from __future__ import annotations
 
+import json
 import os
 import time
 from dataclasses import dataclass
@@ -9,17 +10,35 @@ from typing import Optional
 
 from tqdm import trange
 
+from .checkpoints import CheckpointStore, fingerprint_data, fingerprint_file
 from .progress import emit_progress
 from .subtitles import (
     adjust_subtitle_timing,
+    apply_delivery_profile,
+    delivery_gate_report,
+    delivery_profile_for_orientation,
     fill_transcription_gaps,
     generate_srt,
-    limit_portrait_subtitle_lines,
     split_long_segments,
 )
-from .transcription import transcribe_audio
-from .translation import translate_segments
-from .utils import _print_segments, load_reference_material
+from .sentence_first import (
+    SentenceFirstError,
+    build_delivery_cues,
+    build_source_sentences,
+    resolve_subtitle_delivery,
+)
+from .transcription import (
+    resolve_transcription_backend,
+    transcribe_audio,
+    validate_mlx_backend,
+)
+from .translation import (
+    align_translation_sentence,
+    fit_repair_translation_sentence,
+    translate_segments,
+    translation_prompt_fingerprint,
+)
+from .utils import _print_segments, load_locked_terms, load_reference_material
 from .video_processing import burn_subtitles_into_video, extract_audio, is_portrait_video
 
 
@@ -30,6 +49,8 @@ class PipelineConfig:
     srt_only: bool = False
     save_source_transcript: bool = False
     model: str = "large"
+    transcription_backend: str = "auto"
+    subtitle_delivery: str = "auto"
     language: Optional[str] = None
     target_language: str = "Traditional Chinese (Taiwan)"
     translation_model: str = "deepseek/deepseek-v4-pro"
@@ -37,6 +58,7 @@ class PipelineConfig:
     input_dir: str = "input"
     output_dir: str = "output"
     reference_file: str = "references/tripleS.md"
+    locked_terms_file: str = "references/locked_terms.json"
     temperature: float = 0.0
     font_name: str = "Heiti TC"
     fonts_dir: Optional[str] = None
@@ -47,6 +69,8 @@ class PipelineConfig:
     margin_h: int = 10
     alignment: int = 2
     stage_cooldown: int = 60
+    force: bool = False
+    transcription_artifact: Optional[str] = None
 
 
 def _stage_banner(current: int, total: int, label: str) -> None:
@@ -65,8 +89,33 @@ def _stage_cooldown(seconds: int) -> None:
         time.sleep(1)
 
 
+def _load_transcription_artifact(path: str) -> list[dict]:
+    with open(path, encoding="utf-8") as artifact_file:
+        payload = json.load(artifact_file)
+    segments = payload.get("segments") if isinstance(payload, dict) else payload
+    if not isinstance(segments, list) or not segments or not all(
+        isinstance(segment, dict) for segment in segments
+    ):
+        raise ValueError("Frozen transcription artifact must contain a non-empty segments list.")
+    return segments
+
+
 def process_video(config: PipelineConfig) -> None:
     """Run the configured Hermecho video translation pipeline."""
+    comparison_evidence_dir = os.path.join(config.output_dir, "asr-comparison")
+    subtitle_delivery = resolve_subtitle_delivery(config.subtitle_delivery)
+    transcription_backend = resolve_transcription_backend(
+        config.transcription_backend,
+        config.model,
+        comparison_evidence_dir,
+    )
+    if transcription_backend == "mlx":
+        error = validate_mlx_backend(config.model)
+        if error:
+            print(f"Error: {error}")
+            emit_progress("transcription", "error", error)
+            return
+
     total_stages = 3 if config.transcribe_only else 4
     if not config.transcribe_only and not config.srt_only:
         total_stages += 1
@@ -82,6 +131,11 @@ def process_video(config: PipelineConfig) -> None:
 
     next_stage("Extracting Audio")
     video_path = os.path.abspath(os.path.join(config.input_dir, config.video_filename))
+    video_name = os.path.splitext(config.video_filename)[0]
+    output_dir = os.path.join(config.output_dir, video_name)
+    checkpoint_store = CheckpointStore(
+        os.path.join(output_dir, ".hermecho-checkpoint.json")
+    )
     emit_progress("audio_extraction", "running", "Extracting audio")
     audio_path = extract_audio(video_path)
     if not audio_path:
@@ -92,15 +146,46 @@ def process_video(config: PipelineConfig) -> None:
     try:
         next_stage("Transcribing Audio")
         emit_progress("transcription", "running", "Transcribing audio")
-        transcribed_segments = transcribe_audio(
-            audio_path,
-            model=config.model,
-            language=config.language,
-            temperature=config.temperature,
-        )
-        if not transcribed_segments:
-            emit_progress("transcription", "error", "Audio transcription failed")
-            return
+        if config.transcription_artifact:
+            try:
+                transcribed_segments = _load_transcription_artifact(config.transcription_artifact)
+            except (OSError, UnicodeError, ValueError, json.JSONDecodeError) as error:
+                print(f"Frozen transcription artifact could not be loaded: {error}")
+                emit_progress("transcription", "error", str(error))
+                return
+            print(f"Using frozen transcription artifact: {config.transcription_artifact}")
+        else:
+            transcription_fingerprint = fingerprint_data(
+                {
+                    "audio": fingerprint_file(audio_path),
+                    "backend": transcription_backend,
+                    "language": config.language,
+                    "model": config.model,
+                    "temperature": config.temperature,
+                }
+            )
+            transcribed_segments = (
+                None
+                if config.force
+                else checkpoint_store.load_transcription(transcription_fingerprint)
+            )
+            if transcribed_segments is None:
+                transcribed_segments = transcribe_audio(
+                    audio_path,
+                    model=config.model,
+                    language=config.language,
+                    temperature=config.temperature,
+                    backend=transcription_backend,
+                )
+                if not transcribed_segments:
+                    emit_progress("transcription", "error", "Audio transcription failed")
+                    return
+                checkpoint_store.save_transcription(
+                    transcription_fingerprint,
+                    transcribed_segments,
+                )
+            else:
+                print("Reusing completed transcription checkpoint.")
         emit_progress(
             "transcription",
             "complete",
@@ -115,14 +200,32 @@ def process_video(config: PipelineConfig) -> None:
             transcribed_segments,
         )
 
-        transcribed_segments = split_long_segments(transcribed_segments)
-        _print_segments("Transcription after Splitting", transcribed_segments)
+        if subtitle_delivery == "sentence-first" and not config.transcribe_only:
+            try:
+                transcribed_segments = build_source_sentences(transcribed_segments)
+            except SentenceFirstError as error:
+                print(f"Sentence-first delivery blocked: {error}")
+                emit_progress("subtitle_delivery", "error", str(error))
+                return
+            silence_boundaries: list[float] = []
+            _print_segments("Source Sentences", transcribed_segments)
+        else:
+            transcribed_segments = split_long_segments(transcribed_segments)
+            _print_segments("Transcription after Splitting", transcribed_segments)
 
-        transcribed_segments = fill_transcription_gaps(transcribed_segments)
-        _print_segments("Transcription after Gap-Filling", transcribed_segments)
+            transcribed_segments = fill_transcription_gaps(transcribed_segments)
+            silence_boundaries = [
+                float(segment["start"])
+                for segment in transcribed_segments
+                if segment.get("text", "").strip() == "[no speech]"
+            ]
+            transcribed_segments = [
+                segment
+                for segment in transcribed_segments
+                if segment.get("text", "").strip() != "[no speech]"
+            ]
+            _print_segments("Transcription after Gap-Filling", transcribed_segments)
 
-        video_name = os.path.splitext(config.video_filename)[0]
-        output_dir = os.path.join(config.output_dir, video_name)
         os.makedirs(output_dir, exist_ok=True)
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
 
@@ -144,6 +247,14 @@ def process_video(config: PipelineConfig) -> None:
 
         is_portrait = is_portrait_video(video_path)
         reference_material = load_reference_material(config.reference_file)
+        locked_terms = load_locked_terms(config.locked_terms_file)
+        if locked_terms is None:
+            emit_progress(
+                "translation_gate",
+                "error",
+                "Locked Terms configuration is invalid",
+            )
+            return
 
         if config.save_source_transcript:
             source_srt = os.path.join(
@@ -166,15 +277,57 @@ def process_video(config: PipelineConfig) -> None:
             "running",
             f"Translating to {config.target_language}",
         )
+        translation_fingerprint = fingerprint_data(
+            {
+                "locked_terms": locked_terms,
+                "model": config.translation_model,
+                "prompt": translation_prompt_fingerprint(),
+                "reference": reference_material or "",
+                "source": fingerprint_data(transcribed_segments),
+                "target_language": config.target_language,
+                "subtitle_delivery": subtitle_delivery,
+            }
+        )
+        checkpoint_store.discard_stale_translation(translation_fingerprint)
+
+        def load_accepted_chunk(chunk_index: int, chunk: list[dict]) -> Optional[dict]:
+            if config.force:
+                return None
+            expected_ids = [
+                str(segment.get("_translation_id", index))
+                for index, segment in enumerate(chunk)
+            ]
+            return checkpoint_store.load_accepted_translation_chunk(
+                translation_fingerprint,
+                chunk_index,
+                fingerprint_data(chunk),
+                expected_ids,
+            )
+
+        def save_accepted_chunk(
+            chunk_index: int,
+            chunk: list[dict],
+            translations: dict[str, str],
+        ) -> None:
+            checkpoint_store.save_accepted_translation_chunk(
+                translation_fingerprint,
+                chunk_index,
+                fingerprint_data(chunk),
+                translations,
+            )
+
         translated_segments = translate_segments(
             transcribed_segments,
             target_language=config.target_language,
             translation_model=config.translation_model,
             reference_material=reference_material,
-            preserve_punctuation=is_portrait,
+            locked_terms=locked_terms,
+            preserve_punctuation=True,
+            accepted_chunk_loader=load_accepted_chunk,
+            accepted_chunk_saver=save_accepted_chunk,
         )
 
-        if translated_segments:
+        if translated_segments is not None:
             emit_progress(
                 "translation",
                 "complete",
@@ -186,19 +339,68 @@ def process_video(config: PipelineConfig) -> None:
             translation_label = f"Translation ({config.target_language})"
             _print_segments(translation_label, translated_segments)
 
-            emit_progress(
-                "subtitle_timing_adjustment",
-                "running",
-                "Adjusting subtitle timing",
-            )
-            final_subtitle_segments = adjust_subtitle_timing(
-                translated_segments,
-                config.time_buffer,
-            )
-            if is_portrait:
-                final_subtitle_segments = limit_portrait_subtitle_lines(
-                    final_subtitle_segments
+            profile = delivery_profile_for_orientation(is_portrait)
+            if subtitle_delivery == "sentence-first":
+                delivery_result = build_delivery_cues(
+                    translated_segments,
+                    profile,
+                    fit_repair=lambda sentence, delivery_profile: fit_repair_translation_sentence(
+                        sentence,
+                        target_language=config.target_language,
+                        translation_model=config.translation_model,
+                        reference_material=reference_material,
+                        locked_terms=locked_terms,
+                        profile=delivery_profile,
+                    ),
+                    align=lambda sentence, delivery_profile: align_translation_sentence(
+                        sentence,
+                        target_language=config.target_language,
+                        translation_model=config.translation_model,
+                        profile=delivery_profile,
+                    ),
+                    time_buffer=config.time_buffer,
                 )
+            else:
+                emit_progress(
+                    "subtitle_timing_adjustment",
+                    "running",
+                    "Adjusting subtitle timing",
+                )
+                final_subtitle_segments = adjust_subtitle_timing(
+                    translated_segments,
+                    config.time_buffer,
+                    silence_boundaries=silence_boundaries,
+                )
+                delivery_result = apply_delivery_profile(final_subtitle_segments, profile)
+            emit_progress(
+                "delivery_gate",
+                "running",
+                f"Applying {profile.name} Delivery Profile",
+            )
+            report_path = os.path.join(
+                output_dir,
+                f"{video_name}_{timestamp}_delivery_gate.txt",
+            )
+            report = delivery_gate_report(delivery_result, profile)
+            with open(report_path, "w", encoding="utf-8") as report_file:
+                report_file.write(report + "\n")
+            print(report)
+            if delivery_result.blocked:
+                print("Delivery Gate blocked final delivery; see report for details.")
+                emit_progress(
+                    "delivery_gate",
+                    "error",
+                    "Delivery Gate found Structural Defects",
+                    detail=report_path,
+                )
+                return
+            final_subtitle_segments = delivery_result.cues
+            emit_progress(
+                "delivery_gate",
+                "complete",
+                "Delivery Gate completed",
+                detail=report_path,
+            )
             emit_progress(
                 "subtitle_timing_adjustment",
                 "complete",
@@ -245,7 +447,12 @@ def process_video(config: PipelineConfig) -> None:
                 )
                 emit_progress("completion", "complete", "Hermecho pipeline completed", pct=100)
         else:
-            emit_progress("translation", "error", "Translation failed")
+            print("Translation Gate blocked final SRT/video delivery.")
+            emit_progress(
+                "translation",
+                "error",
+                "Translation Gate blocked final SRT/video delivery",
+            )
 
     finally:
         if os.path.exists(audio_path):
