@@ -12,6 +12,7 @@ from hermecho.video_processing import (
     _build_subtitles_filter,
     _ffmpeg_supports_subtitles_filter,
     burn_subtitles_into_video,
+    is_ffmpeg_installed,
 )
 
 
@@ -51,6 +52,14 @@ class TestSubtitleFilterConstruction(unittest.TestCase):
 
 
 class TestFfmpegCapabilityDetection(unittest.TestCase):
+
+    def test_installation_check_uses_path_lookup(self) -> None:
+        for executable, expected in (("/usr/bin/ffmpeg", True), (None, False)):
+            with self.subTest(executable=executable), patch(
+                "hermecho.video_processing.shutil.which",
+                return_value=executable,
+            ):
+                self.assertIs(is_ffmpeg_installed(), expected)
 
     @patch("hermecho.video_processing.subprocess.run")
     def test_supports_subtitles_filter_when_present(self, mock_run) -> None:
