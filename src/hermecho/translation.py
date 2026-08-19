@@ -362,7 +362,6 @@ def align_translation_sentence(
     *,
     target_language: str,
     translation_model: str,
-    profile: Any,
 ) -> Optional[List[Dict]]:
     """Ask for an unchanged target-to-Source-Word mapping."""
     source_words = [
@@ -488,7 +487,6 @@ def translate_segments(
     target_language: str,
     translation_model: str,
     reference_material: Optional[str],
-    preserve_punctuation: bool = False,
     locked_terms: Optional[Dict[str, str]] = None,
     accepted_chunk_loader: Optional[
         Callable[[int, List[Dict]], Optional[Dict[str, str]]]
@@ -516,8 +514,6 @@ def translate_segments(
     Returns:
         A list of translated segments, or None if a critical error occurs.
     """
-    # Kept for API compatibility; accepted Translation Sentences always keep punctuation.
-    _ = preserve_punctuation
     print("Translating text using an optimized strategy...")
     locked_terms = locked_terms or {}
     translation_segments = [
@@ -561,118 +557,94 @@ def translate_segments(
     total_length = len(full_text) + prompt_overhead
 
     try:
-        use_sliding_window = False
         usage_totals: Dict[str, int] = {}
-
-        if total_length < TOKEN_THRESHOLD:
+        single_batch = total_length < TOKEN_THRESHOLD
+        if single_batch:
             print(
                 "Text is short enough. Attempting to translate in a "
                 "single batch."
             )
-            emit_progress(
-                "translation_strategy",
-                "running",
-                "Using single batch translation",
-                total=1,
-            )
-            with tqdm(total=1, desc="Translating (single batch)", unit="batch") as pbar:
+            chunk_size = num_segments
+            strategy_message = "Using single batch translation"
+            progress_description = "Translating (single batch)"
+            progress_unit = "batch"
+        else:
+            print("Text is too long, using sliding window translation.")
+            chunk_size = CHUNK_SIZE
+            strategy_message = "Using sliding window translation"
+            progress_description = "Translating in chunks"
+            progress_unit = "chunk"
+
+        num_chunks = (num_segments + chunk_size - 1) // chunk_size
+        emit_progress(
+            "translation_strategy",
+            "running",
+            strategy_message,
+            total=num_chunks,
+        )
+
+        for chunk_index in tqdm(
+            range(num_chunks),
+            desc=progress_description,
+            unit=progress_unit,
+        ):
+            start_index = chunk_index * chunk_size
+            end_index = min(start_index + chunk_size, num_segments)
+            chunk = translation_segments[start_index:end_index]
+
+            if single_batch:
+                context = {}
                 emit_progress(
                     "translation",
                     "running",
                     "Translating single batch",
                 )
-                translated_segments_text = load_accepted_chunk(0, translation_segments)
-                chunk_usage: Dict[str, int] = {}
-                defects: Dict[str, List[str]] = {}
-                if translated_segments_text is None:
-                    translated_segments_text, chunk_usage, defects = _translate_chunk_with_gate(
-                        translation_segments,
-                        target_language,
-                        translation_model,
-                        reference_material,
-                        context={},
-                        locked_terms=locked_terms,
-                    )
-                    if translated_segments_text is not None and accepted_chunk_saver is not None:
-                        accepted_chunk_saver(0, translation_segments, translated_segments_text)
-                pbar.update(1)
-            _merge_api_usage_tokens(usage_totals, chunk_usage)
-
-            if translated_segments_text is None:
-                _report_translation_gate_failure(defects)
-                return None
-        else:
-            print("Text is too long, using sliding window translation.")
-            use_sliding_window = True
-
-        # Strategy 2: Sliding Window (Chunks)
-        if use_sliding_window:
-            translated_segments_text = {}
-            num_chunks = (num_segments + CHUNK_SIZE - 1) // CHUNK_SIZE
-            emit_progress(
-                "translation_strategy",
-                "running",
-                "Using sliding window translation",
-                total=num_chunks,
-            )
-
-            for i in tqdm(
-                range(num_chunks),
-                desc="Translating in chunks",
-                unit="chunk",
-            ):
-                start_index = i * CHUNK_SIZE
-                end_index = min(start_index + CHUNK_SIZE, num_segments)
-                chunk = translation_segments[start_index:end_index]
-
-                # Define context
+            else:
                 prev_start = max(0, start_index - OVERLAP_SIZE)
                 prev_context_segments = translation_segments[prev_start:start_index]
-                next_start = end_index
-                next_end = min(next_start + OVERLAP_SIZE, num_segments)
-                next_context_segments = translation_segments[next_start:next_end]
-
+                next_end = min(end_index + OVERLAP_SIZE, num_segments)
+                next_context_segments = translation_segments[end_index:next_end]
                 context = {
-                    'prev': "\n".join([seg["text"] for seg in prev_context_segments]),
-                    'next': "\n".join([seg["text"] for seg in next_context_segments])
+                    "prev": "\n".join(seg["text"] for seg in prev_context_segments),
+                    "next": "\n".join(seg["text"] for seg in next_context_segments),
                 }
-
                 emit_progress(
                     "translation",
                     "running",
-                    f"Translating chunk {i + 1}/{num_chunks}",
-                    current=i + 1,
+                    f"Translating chunk {chunk_index + 1}/{num_chunks}",
+                    current=chunk_index + 1,
                     total=num_chunks,
                 )
-                translated_chunk = load_accepted_chunk(i, chunk)
-                u: Dict[str, int] = {}
-                defects: Dict[str, List[str]] = {}
-                if translated_chunk is None:
-                    translated_chunk, u, defects = _translate_chunk_with_gate(
-                        chunk,
-                        target_language,
-                        translation_model,
-                        reference_material,
-                        context,
-                        locked_terms,
-                    )
-                    if translated_chunk is not None and accepted_chunk_saver is not None:
-                        accepted_chunk_saver(i, chunk, translated_chunk)
-                _merge_api_usage_tokens(usage_totals, u)
 
-                if translated_chunk is None:
-                    _report_translation_gate_failure(defects)
-                    return None
+            translated_chunk = load_accepted_chunk(chunk_index, chunk)
+            chunk_usage: Dict[str, int] = {}
+            defects: Dict[str, List[str]] = {}
+            if translated_chunk is None:
+                translated_chunk, chunk_usage, defects = _translate_chunk_with_gate(
+                    chunk,
+                    target_language,
+                    translation_model,
+                    reference_material,
+                    context,
+                    locked_terms,
+                )
+                if translated_chunk is not None and accepted_chunk_saver is not None:
+                    accepted_chunk_saver(chunk_index, chunk, translated_chunk)
+            _merge_api_usage_tokens(usage_totals, chunk_usage)
 
-                if translated_chunk:
-                    translated_segments_text.update(translated_chunk)
-                    emit_progress(
-                        "translation",
-                        "complete",
-                        f"Translated chunk {i + 1}/{num_chunks}",
-                        current=i + 1,
-                        total=num_chunks,
-                    )
+            if translated_chunk is None:
+                _report_translation_gate_failure(defects)
+                return None
+
+            translated_segments_text.update(translated_chunk)
+            if not single_batch:
+                emit_progress(
+                    "translation",
+                    "complete",
+                    f"Translated chunk {chunk_index + 1}/{num_chunks}",
+                    current=chunk_index + 1,
+                    total=num_chunks,
+                )
 
         _log_translation_api_tokens(
             "Translation API tokens — cumulative (reported chunks)",

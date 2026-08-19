@@ -1,5 +1,0 @@
-{
-    "python.defaultInterpreterPath": "/opt/miniconda3/envs/hermecho/bin/python",
-    "python.condaPath": "/opt/miniconda3/bin/conda",
-    "python.terminal.activateEnvironment": true
-}

@@ -27,11 +27,8 @@ def fingerprint_data(value: Any) -> str:
 
 def fingerprint_file(path: str) -> str:
     """Return a content fingerprint without retaining the source audio."""
-    digest = hashlib.sha256()
     with open(path, "rb") as source:
-        for block in iter(lambda: source.read(1024 * 1024), b""):
-            digest.update(block)
-    return digest.hexdigest()
+        return hashlib.file_digest(source, "sha256").hexdigest()
 
 
 def _json_object_without_duplicates(pairs: List[tuple[str, Any]]) -> Dict[str, Any]:
