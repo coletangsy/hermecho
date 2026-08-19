@@ -487,8 +487,6 @@ class TestPipelineOrchestration(unittest.TestCase):
                 "alignment": 2,
             },
         )
-        self.assertTrue(translate.call_args.kwargs["preserve_punctuation"])
-
     def test_legacy_pipeline_transcribes_with_whisper_and_adjusts_timing(self) -> None:
         with tempfile.NamedTemporaryFile(suffix=".mp3", delete=False) as tmp:
             audio_path = tmp.name
@@ -549,7 +547,6 @@ class TestPipelineOrchestration(unittest.TestCase):
             silence_boundaries=[],
         )
         generate_srt.assert_called_once_with(adjusted, generate_srt.call_args.args[1])
-        self.assertTrue(translate.call_args.kwargs["preserve_punctuation"])
         self.assertEqual(generate_srt.call_args.args[0][0]["text"], "你好，世界。")
 
     def test_sentence_first_pipeline_translates_source_sentences_with_word_evidence(self) -> None:

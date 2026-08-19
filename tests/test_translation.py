@@ -471,29 +471,21 @@ class TestOpenRouterTranslation(unittest.TestCase):
             ["0", "3"],
         )
 
-    def test_translate_segments_preserves_punctuation_for_all_delivery_profiles(self) -> None:
+    def test_translate_segments_preserves_punctuation(self) -> None:
         segments = [{"start": 0.0, "end": 1.0, "text": "hello"}]
 
         with patch(
             "hermecho.translation._translate_chunk",
             return_value=({"translations": {"0": "你好，世界。"}}, None),
         ):
-            portrait = translate_segments(
-                segments,
-                target_language="Traditional Chinese (Taiwan)",
-                translation_model="test-model",
-                reference_material=None,
-                preserve_punctuation=True,
-            )
-            landscape = translate_segments(
+            translated = translate_segments(
                 segments,
                 target_language="Traditional Chinese (Taiwan)",
                 translation_model="test-model",
                 reference_material=None,
             )
 
-        self.assertEqual(portrait[0]["text"], "你好，世界。")
-        self.assertEqual(landscape[0]["text"], "你好，世界。")
+        self.assertEqual(translated[0]["text"], "你好，世界。")
 
     def test_translation_gate_rejects_dropped_terminal_punctuation(self) -> None:
         with patch(

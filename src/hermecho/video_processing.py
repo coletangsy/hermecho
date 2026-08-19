@@ -3,6 +3,7 @@ This module contains functions for video and audio processing.
 """
 import json
 import os
+import shutil
 import subprocess
 import threading
 from typing import List, Optional
@@ -375,9 +376,4 @@ def is_ffmpeg_installed() -> bool:
     Returns:
         True if ffmpeg is installed, False otherwise.
     """
-    try:
-        subprocess.run(["ffmpeg", "-version"], check=True,
-                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        return True
-    except (subprocess.CalledProcessError, FileNotFoundError):
-        return False
+    return shutil.which("ffmpeg") is not None

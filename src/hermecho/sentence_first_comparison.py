@@ -14,18 +14,19 @@ from typing import Optional, Sequence
 from dotenv import load_dotenv
 
 from .asr_comparison import (
+    DEFAULT_END,
+    DEFAULT_START,
+    REVIEW_MEDIA_FILENAME,
     _effective_cli_style,
     _extract_review_range,
+    _one_artifact,
     _write_review_composite,
 )
 from .checkpoints import fingerprint_data
 from .sentence_first import REVIEW_CHECKS, SentenceFirstError, build_source_sentences
 
 
-DEFAULT_START = "00:29:30.000"
-DEFAULT_END = "00:39:30.000"
 DEFAULT_EVIDENCE_DIR = Path("output/sentence-first-comparison")
-REVIEW_MEDIA_FILENAME = "20251231_w-yGSP1c3bg.mp4"
 
 
 @dataclass(frozen=True)
@@ -49,8 +50,6 @@ class ComparisonConfig:
     margin_v: int = 20
     margin_h: int = 10
     alignment: int = 2
-    start: str = DEFAULT_START
-    end: str = DEFAULT_END
 
 
 def _relative_path(output_dir: Path, path: Path) -> str:
@@ -58,15 +57,6 @@ def _relative_path(output_dir: Path, path: Path) -> str:
         return str(path.resolve().relative_to(output_dir.resolve()))
     except ValueError as error:
         raise ValueError(f"Comparison artifact must be inside {output_dir}: {path}") from error
-
-
-def _one_artifact(directory: Path, pattern: str) -> Path:
-    matches = sorted(directory.rglob(pattern))
-    if len(matches) != 1:
-        raise FileNotFoundError(
-            f"Expected one {pattern} artifact under {directory}, found {len(matches)}."
-        )
-    return matches[0]
 
 
 def _delivery_gate_status(path: Path) -> str:
@@ -86,8 +76,6 @@ def _write_review_artifacts(
     *,
     source_video: Path,
     range_path: Path,
-    start: str,
-    end: str,
     frozen_transcription: Path,
     frozen_source_transcript: Path,
     frozen_fingerprint: str,
@@ -136,8 +124,8 @@ def _write_review_artifacts(
                 source_stat.st_mtime,
                 timezone.utc,
             ).isoformat(),
-            "start": start,
-            "end": end,
+            "start": DEFAULT_START,
+            "end": DEFAULT_END,
             "prepared_media": range_path.name,
             "shared_audio": "review_composite.mp4",
         },
@@ -175,7 +163,7 @@ def _write_review_artifacts(
                 "# Sentence-first Delivery Comparison Review",
                 "",
                 "## Frozen comparison",
-                f"- Media: `{source_video.name}` from `{start}` through `{end}`",
+                f"- Media: `{source_video.name}` from `{DEFAULT_START}` through `{DEFAULT_END}`",
                 f"- Frozen transcription: `{artifacts['frozen_transcription']}`",
                 "- Baseline: legacy delivery",
                 "- Candidate: sentence-first delivery",
@@ -211,8 +199,6 @@ def run_comparison(config: ComparisonConfig) -> Path:
         raise FileNotFoundError(f"Comparison media not found: {config.video_path}")
     if config.video_path.name != REVIEW_MEDIA_FILENAME:
         raise ValueError(f"Phase 3 uses the fixed media {REVIEW_MEDIA_FILENAME}.")
-    if (config.start, config.end) != (DEFAULT_START, DEFAULT_END):
-        raise ValueError("Phase 3 uses the fixed 10-minute review range.")
     if config.output_dir.exists() and any(config.output_dir.iterdir()):
         raise FileExistsError(f"Comparison output must be empty: {config.output_dir}")
 
@@ -227,7 +213,7 @@ def run_comparison(config: ComparisonConfig) -> Path:
     config.output_dir.mkdir(parents=True, exist_ok=True)
 
     range_path = config.output_dir / "media_range.mp4"
-    _extract_review_range(config.video_path, range_path, config.start, config.end)
+    _extract_review_range(config.video_path, range_path, DEFAULT_START, DEFAULT_END)
 
     from .pipeline import PipelineConfig, process_video
     from .subtitles import generate_srt
@@ -329,8 +315,6 @@ def run_comparison(config: ComparisonConfig) -> Path:
         config.output_dir,
         source_video=config.video_path,
         range_path=range_path,
-        start=config.start,
-        end=config.end,
         frozen_transcription=frozen_path,
         frozen_source_transcript=frozen_source_path,
         frozen_fingerprint=frozen_fingerprint,

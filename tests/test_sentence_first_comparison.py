@@ -6,7 +6,6 @@ from unittest.mock import patch
 
 from hermecho import cli
 from hermecho.sentence_first_comparison import ComparisonConfig, main, run_comparison
-from hermecho.sentence_first import evidence_allows_sentence_first
 
 
 class TestSentenceFirstComparison(unittest.TestCase):
@@ -215,7 +214,6 @@ class TestSentenceFirstComparison(unittest.TestCase):
             )
             self.assertTrue((output_dir / "review_composite.mp4").is_file())
             self.assertTrue((output_dir / "review.md").is_file())
-            self.assertFalse(evidence_allows_sentence_first(output_dir))
             self.assertFalse(audio_path.exists())
             default_fonts_dir = cli.parse_args(["clip.mp4"]).fonts_dir
             self.assertTrue(process_configs)

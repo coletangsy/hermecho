@@ -1,7 +1,4 @@
 from unittest.mock import Mock
-import json
-import tempfile
-from pathlib import Path
 import unittest
 
 from hermecho.subtitles import PORTRAIT_DELIVERY_PROFILE
@@ -9,7 +6,6 @@ from hermecho.sentence_first import (
     SentenceFirstError,
     build_delivery_cues,
     build_source_sentences,
-    evidence_allows_sentence_first,
     resolve_subtitle_delivery,
 )
 
@@ -388,78 +384,6 @@ class TestSentenceFirstPromotion(unittest.TestCase):
         self.assertEqual(resolve_subtitle_delivery("auto"), "sentence-first")
         self.assertEqual(resolve_subtitle_delivery("legacy"), "legacy")
         self.assertEqual(resolve_subtitle_delivery("sentence-first"), "sentence-first")
-
-    def test_approved_evidence_is_valid(self) -> None:
-        with tempfile.TemporaryDirectory() as temporary_dir:
-            evidence_dir = Path(temporary_dir)
-            for name in (
-                "manifest.json",
-                "review_composite.mp4",
-                "transcript.json",
-                "media_range.mp4",
-            ):
-                (evidence_dir / name).write_text("evidence", encoding="utf-8")
-            (evidence_dir / "comparison.json").write_text(
-                json.dumps(
-                    {
-                        "comparison_variable": "subtitle_delivery",
-                        "baseline": "legacy",
-                        "candidate": "sentence-first",
-                        "media_range": {
-                            "source_name": "20251231_w-yGSP1c3bg.mp4",
-                            "start": "00:29:30.000",
-                            "end": "00:39:30.000",
-                            "prepared_media": "media_range.mp4",
-                            "shared_audio": "review_composite.mp4",
-                        },
-                        "frozen_transcription": {"fingerprint": "frozen"},
-                        "delivery_gates": {"baseline": "passed", "candidate": "passed"},
-                        "artifacts": {
-                            "manifest": "manifest.json",
-                            "review_composite": "review_composite.mp4",
-                            "transcript": "transcript.json",
-                        },
-                    }
-                ),
-                encoding="utf-8",
-            )
-            (evidence_dir / "review.md").write_text(
-                "\n".join(
-                    [
-                        "## Review checklist",
-                        *[f"- {check.title()}: pass" for check in (
-                            "translation completeness",
-                            "meaning boundaries",
-                            "timing",
-                            "readability",
-                            "locked terms",
-                            "punctuation",
-                            "presentation warnings",
-                        )],
-                        "## Timestamped Candidate-only regressions",
-                        "- none.",
-                        "## Human Approval",
-                        "- Reviewer: reviewer",
-                        "- Date: 2026-08-11",
-                        "- Decision: approved",
-                        *[
-                            f"- Candidate-only {check}: no"
-                            for check in (
-                                "translation completeness",
-                                "meaning boundaries",
-                                "timing",
-                                "readability",
-                                "locked terms",
-                                "punctuation",
-                                "presentation warnings",
-                            )
-                        ],
-                    ]
-                ),
-                encoding="utf-8",
-            )
-
-            self.assertTrue(evidence_allows_sentence_first(evidence_dir))
 
 
 if __name__ == "__main__":

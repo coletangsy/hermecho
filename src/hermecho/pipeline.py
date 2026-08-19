@@ -322,7 +322,6 @@ def process_video(config: PipelineConfig) -> None:
             translation_model=config.translation_model,
             reference_material=reference_material,
             locked_terms=locked_terms,
-            preserve_punctuation=True,
             accepted_chunk_loader=load_accepted_chunk,
             accepted_chunk_saver=save_accepted_chunk,
         )
@@ -352,11 +351,10 @@ def process_video(config: PipelineConfig) -> None:
                         locked_terms=locked_terms,
                         profile=delivery_profile,
                     ),
-                    align=lambda sentence, delivery_profile: align_translation_sentence(
+                    align=lambda sentence: align_translation_sentence(
                         sentence,
                         target_language=config.target_language,
                         translation_model=config.translation_model,
-                        profile=delivery_profile,
                     ),
                     time_buffer=config.time_buffer,
                 )
