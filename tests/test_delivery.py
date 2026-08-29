@@ -6,7 +6,6 @@ from unittest.mock import patch
 
 from hermecho.pipeline import PipelineConfig, process_video
 from hermecho.subtitles import (
-    adjust_subtitle_timing,
     apply_delivery_profile,
     delivery_gate_report,
     delivery_profile_for_orientation,
@@ -67,17 +66,6 @@ class TestDeliveryProfiles(unittest.TestCase):
                 delivery_profile_for_orientation(is_portrait=False),
             ).blocked
         )
-
-    def test_adjust_timing_keeps_original_duration_when_buffer_cannot_fit(self) -> None:
-        adjusted = adjust_subtitle_timing(
-            [
-                {"start": 0.0, "end": 0.1, "text": "first"},
-                {"start": 0.1, "end": 1.0, "text": "second"},
-            ],
-            time_buffer=0.1,
-        )
-
-        self.assertEqual(adjusted[0]["end"], 0.1)
 
     def test_portrait_and_landscape_use_independent_line_limits(self) -> None:
         portrait = delivery_profile_for_orientation(is_portrait=True)
@@ -402,7 +390,7 @@ class TestDeliveryProfiles(unittest.TestCase):
             2,
         )
 
-    def test_none_source_words_falls_back_to_legacy_words(self) -> None:
+    def test_none_source_words_falls_back_to_words(self) -> None:
         portrait = delivery_profile_for_orientation(is_portrait=True)
         result = apply_delivery_profile(
             [
@@ -510,14 +498,20 @@ class TestDeliveryPipeline(unittest.TestCase):
             output_dir=output_dir,
             srt_only=True,
             stage_cooldown=0,
-            subtitle_delivery="legacy",
         )
         translated = [{"start": 0.0, "end": 1.0, "text": "甲" * 25}]
 
         try:
             with patch("hermecho.pipeline.extract_audio", return_value=audio_path), \
                 patch("hermecho.pipeline.transcribe_audio", return_value=translated), \
+                patch("hermecho.pipeline.build_source_sentences", return_value=translated), \
                 patch("hermecho.pipeline.translate_segments", return_value=translated), \
+                patch(
+                    "hermecho.pipeline.build_delivery_cues",
+                    side_effect=lambda cues, profile, **_kwargs: apply_delivery_profile(
+                        cues, profile
+                    ),
+                ), \
                 patch("hermecho.pipeline.load_reference_material", return_value=""), \
                 patch("hermecho.pipeline.is_portrait_video", return_value=True):
                 process_video(config)
@@ -547,14 +541,20 @@ class TestDeliveryPipeline(unittest.TestCase):
             output_dir=output_dir,
             srt_only=True,
             stage_cooldown=0,
-            subtitle_delivery="legacy",
         )
         translated = [{"start": 0.0, "end": 0.0, "text": "甲"}]
 
         try:
             with patch("hermecho.pipeline.extract_audio", return_value=audio_path), \
                 patch("hermecho.pipeline.transcribe_audio", return_value=translated), \
+                patch("hermecho.pipeline.build_source_sentences", return_value=translated), \
                 patch("hermecho.pipeline.translate_segments", return_value=translated), \
+                patch(
+                    "hermecho.pipeline.build_delivery_cues",
+                    side_effect=lambda cues, profile, **_kwargs: apply_delivery_profile(
+                        cues, profile
+                    ),
+                ), \
                 patch("hermecho.pipeline.load_reference_material", return_value=""), \
                 patch("hermecho.pipeline.is_portrait_video", return_value=True):
                 process_video(config)

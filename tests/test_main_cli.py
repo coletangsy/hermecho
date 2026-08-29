@@ -1,4 +1,3 @@
-import argparse
 import importlib.util
 import json
 import os
@@ -11,6 +10,7 @@ from unittest.mock import MagicMock, patch
 
 from hermecho import cli
 from hermecho.pipeline import PipelineConfig
+from hermecho.subtitles import apply_delivery_profile
 
 
 class TestCliArguments(unittest.TestCase):
@@ -76,15 +76,6 @@ class TestCliArguments(unittest.TestCase):
 
                 self.assertEqual(config.transcription_backend, backend)
 
-    def test_parse_args_accepts_subtitle_delivery_modes(self) -> None:
-        for mode in ("auto", "legacy", "sentence-first"):
-            with self.subTest(mode=mode):
-                config = cli.config_from_args(
-                    cli.parse_args(["clip.mp4", "--subtitle-delivery", mode])
-                )
-
-                self.assertEqual(config.subtitle_delivery, mode)
-
     def test_parse_args_preserves_fonts_dir(self) -> None:
         config = cli.config_from_args(
             cli.parse_args(["clip.mp4", "--fonts-dir", "/tmp/pingfang"])
@@ -127,8 +118,8 @@ class TestPipelineOrchestration(unittest.TestCase):
             return audio.name
 
     @staticmethod
-    def _checkpoint_delivery(cues, _profile):
-        return SimpleNamespace(blocked=False, cues=cues)
+    def _checkpoint_delivery(cues, *_args, **_kwargs):
+        return SimpleNamespace(blocked=False, cues=cues, diagnostics=[])
 
     def test_translation_gate_blocks_srt_and_video_after_retries(self) -> None:
         with tempfile.NamedTemporaryFile(suffix=".mp3", delete=False) as tmp:
@@ -141,13 +132,13 @@ class TestPipelineOrchestration(unittest.TestCase):
             output_dir=tempfile.mkdtemp(),
             language="ko",
             stage_cooldown=0,
-            subtitle_delivery="legacy",
         )
         transcribed = [{"start": 0.0, "end": 1.0, "text": "hello"}]
 
         try:
             with patch("hermecho.pipeline.extract_audio", return_value=audio_path), \
                 patch("hermecho.pipeline.transcribe_audio", return_value=transcribed), \
+                patch("hermecho.pipeline.build_source_sentences", return_value=transcribed), \
                 patch("hermecho.pipeline.is_portrait_video", return_value=False), \
                 patch("hermecho.pipeline.load_reference_material", return_value=""), \
                 patch(
@@ -178,6 +169,7 @@ class TestPipelineOrchestration(unittest.TestCase):
 
         transcribed = [
             {"start": 0.0, "end": 1.0, "text": "first"},
+            {"start": 1.0, "end": 7.0, "text": "[no speech]"},
             {"start": 7.0, "end": 8.0, "text": "second"},
         ]
         translated = [
@@ -199,15 +191,21 @@ class TestPipelineOrchestration(unittest.TestCase):
                         save_source_transcript=mode == "save_source_transcript",
                         language="ko",
                         stage_cooldown=0,
-                        subtitle_delivery="legacy",
                     )
                     with patch("hermecho.pipeline.extract_audio", return_value=audio_path), \
                         patch("hermecho.pipeline.transcribe_audio", return_value=transcribed), \
+                        patch(
+                            "hermecho.pipeline.build_source_sentences",
+                            return_value=[transcribed[0], transcribed[2]],
+                        ), \
                         patch("hermecho.pipeline.is_portrait_video", return_value=False), \
                         patch("hermecho.pipeline.load_reference_material", return_value=""), \
                         patch("hermecho.pipeline.load_locked_terms", return_value={}), \
                         patch("hermecho.pipeline.translate_segments", return_value=translated) as translate, \
-                        patch("hermecho.pipeline.adjust_subtitle_timing", return_value=translated), \
+                        patch(
+                            "hermecho.pipeline.build_delivery_cues",
+                            return_value=self._checkpoint_delivery(translated),
+                        ), \
                         patch("hermecho.pipeline.generate_srt") as generate_srt:
                         cli.process_video(config)
 
@@ -224,46 +222,6 @@ class TestPipelineOrchestration(unittest.TestCase):
         finally:
             if os.path.exists(audio_path):
                 os.unlink(audio_path)
-
-    def test_pipeline_keeps_silence_boundary_for_subtitle_timing(self) -> None:
-        with tempfile.NamedTemporaryFile(suffix=".mp3", delete=False) as tmp:
-            audio_path = tmp.name
-            tmp.write(b"fake")
-
-        transcribed = [
-            {"start": 0.0, "end": 1.0, "text": "first"},
-            {"start": 7.0, "end": 8.0, "text": "second"},
-        ]
-        translated = [
-            {"start": 0.0, "end": 1.0, "text": "甲"},
-            {"start": 7.0, "end": 8.0, "text": "乙"},
-        ]
-        config = PipelineConfig(
-            video_filename="clip.mp4",
-            input_dir="input",
-            output_dir=tempfile.mkdtemp(),
-            language="ko",
-            srt_only=True,
-            stage_cooldown=0,
-            subtitle_delivery="legacy",
-        )
-
-        try:
-            with patch("hermecho.pipeline.extract_audio", return_value=audio_path), \
-                patch("hermecho.pipeline.transcribe_audio", return_value=transcribed), \
-                patch("hermecho.pipeline.is_portrait_video", return_value=False), \
-                patch("hermecho.pipeline.load_reference_material", return_value=""), \
-                patch("hermecho.pipeline.load_locked_terms", return_value={}), \
-                patch("hermecho.pipeline.translate_segments", return_value=translated), \
-                patch("hermecho.pipeline.generate_srt") as generate_srt:
-                cli.process_video(config)
-        finally:
-            if os.path.exists(audio_path):
-                os.unlink(audio_path)
-
-        final_segments = generate_srt.call_args.args[0]
-        self.assertNotIn("[no speech]", [segment["text"] for segment in final_segments])
-        self.assertLessEqual(final_segments[0]["end"], 1.0)
 
     def test_pipeline_blocks_missing_or_malformed_locked_terms_files(self) -> None:
         with tempfile.NamedTemporaryFile(suffix=".mp3", delete=False) as tmp:
@@ -290,11 +248,14 @@ class TestPipelineOrchestration(unittest.TestCase):
                             language="ko",
                             locked_terms_file=locked_terms_path,
                             stage_cooldown=0,
-                            subtitle_delivery="legacy",
                         )
                         with patch("hermecho.pipeline.extract_audio", return_value=audio_path), \
                             patch(
                                 "hermecho.pipeline.transcribe_audio",
+                                return_value=[{"start": 0.0, "end": 1.0, "text": "hello"}],
+                            ), \
+                            patch(
+                                "hermecho.pipeline.build_source_sentences",
                                 return_value=[{"start": 0.0, "end": 1.0, "text": "hello"}],
                             ), \
                             patch("hermecho.pipeline.is_portrait_video", return_value=False), \
@@ -326,13 +287,16 @@ class TestPipelineOrchestration(unittest.TestCase):
             language="ko",
             locked_terms_file=locked_terms_path,
             stage_cooldown=0,
-            subtitle_delivery="legacy",
         )
 
         try:
             with patch("hermecho.pipeline.extract_audio", return_value=audio_path), \
                 patch(
                     "hermecho.pipeline.transcribe_audio",
+                    return_value=[{"start": 0.0, "end": 1.0, "text": "hello"}],
+                ), \
+                patch(
+                    "hermecho.pipeline.build_source_sentences",
                     return_value=[{"start": 0.0, "end": 1.0, "text": "hello"}],
                 ), \
                 patch("hermecho.pipeline.is_portrait_video", return_value=False), \
@@ -396,7 +360,6 @@ class TestPipelineOrchestration(unittest.TestCase):
             language="ko",
             fonts_dir="/tmp/pingfang",
             stage_cooldown=0,
-            subtitle_delivery="legacy",
         )
         translated = [
             {
@@ -430,8 +393,14 @@ class TestPipelineOrchestration(unittest.TestCase):
         try:
             with patch("hermecho.pipeline.extract_audio", return_value=audio_path), \
                 patch("hermecho.pipeline.transcribe_audio", return_value=translated), \
+                patch("hermecho.pipeline.build_source_sentences", return_value=translated), \
                 patch("hermecho.pipeline.translate_segments", return_value=translated) as translate, \
-                patch("hermecho.pipeline.adjust_subtitle_timing", return_value=translated), \
+                patch(
+                    "hermecho.pipeline.build_delivery_cues",
+                    side_effect=lambda cues, profile, **_kwargs: apply_delivery_profile(
+                        cues, profile
+                    ),
+                ), \
                 patch("hermecho.pipeline.load_reference_material", return_value=""), \
                 patch("hermecho.pipeline.burn_subtitles_into_video") as burn, \
                 patch("hermecho.video_processing.subprocess.run", return_value=ffprobe_result):
@@ -487,12 +456,12 @@ class TestPipelineOrchestration(unittest.TestCase):
                 "alignment": 2,
             },
         )
-    def test_legacy_pipeline_transcribes_with_whisper_and_adjusts_timing(self) -> None:
+    def test_pipeline_transcribes_with_whisper_and_builds_delivery_cues(self) -> None:
         with tempfile.NamedTemporaryFile(suffix=".mp3", delete=False) as tmp:
             audio_path = tmp.name
             tmp.write(b"fake")
 
-        args = argparse.Namespace(
+        config = PipelineConfig(
             video_filename="clip.mp4",
             transcribe_only=False,
             srt_only=True,
@@ -514,18 +483,20 @@ class TestPipelineOrchestration(unittest.TestCase):
             margin_h=10,
             alignment=2,
             stage_cooldown=0,
-            subtitle_delivery="legacy",
         )
         transcribed = [{"start": 0.0, "end": 1.0, "text": "hello"}]
         translated = [{"start": 0.0, "end": 1.0, "text": "你好，世界。"}]
         adjusted = [{"start": 0.0, "end": 1.2, "text": "你好，世界。"}]
 
         try:
-            config = PipelineConfig(**vars(args))
             with patch("hermecho.pipeline.extract_audio", return_value=audio_path), \
                 patch("hermecho.pipeline.transcribe_audio", return_value=transcribed) as transcribe, \
+                patch("hermecho.pipeline.build_source_sentences", return_value=transcribed), \
                 patch("hermecho.pipeline.translate_segments", return_value=translated) as translate, \
-                patch("hermecho.pipeline.adjust_subtitle_timing", return_value=adjusted) as adjust, \
+                patch(
+                    "hermecho.pipeline.build_delivery_cues",
+                    return_value=self._checkpoint_delivery(adjusted),
+                ) as deliver, \
                 patch("hermecho.pipeline.generate_srt") as generate_srt, \
                 patch("hermecho.pipeline.is_portrait_video", return_value=False), \
                 patch("hermecho.pipeline.load_reference_material", return_value=""):
@@ -541,11 +512,8 @@ class TestPipelineOrchestration(unittest.TestCase):
             temperature=0.0,
             backend="whisper",
         )
-        adjust.assert_called_once_with(
-            translated,
-            0.25,
-            silence_boundaries=[],
-        )
+        self.assertEqual(deliver.call_args.args[0], translated)
+        self.assertEqual(deliver.call_args.kwargs["time_buffer"], 0.25)
         generate_srt.assert_called_once_with(adjusted, generate_srt.call_args.args[1])
         self.assertEqual(generate_srt.call_args.args[0][0]["text"], "你好，世界。")
 
@@ -578,7 +546,6 @@ class TestPipelineOrchestration(unittest.TestCase):
             output_dir=tempfile.mkdtemp(),
             language="ko",
             srt_only=True,
-            subtitle_delivery="sentence-first",
             stage_cooldown=0,
         )
 
@@ -610,7 +577,6 @@ class TestPipelineOrchestration(unittest.TestCase):
             output_dir=tempfile.mkdtemp(),
             language="ko",
             srt_only=True,
-            subtitle_delivery="sentence-first",
             stage_cooldown=0,
         )
 
@@ -630,53 +596,6 @@ class TestPipelineOrchestration(unittest.TestCase):
         translate.assert_not_called()
         generate_srt.assert_not_called()
 
-    @patch.dict(sys.modules, {"timing_review": None})
-    def test_full_pipeline_does_not_import_or_call_timing_review(self) -> None:
-        with tempfile.NamedTemporaryFile(suffix=".mp3", delete=False) as tmp:
-            audio_path = tmp.name
-            tmp.write(b"fake")
-
-        args = argparse.Namespace(
-            video_filename="clip.mp4",
-            transcribe_only=False,
-            srt_only=True,
-            save_source_transcript=False,
-            model="tiny",
-            language="ko",
-            target_language="Traditional Chinese (Taiwan)",
-            translation_model="openrouter-test",
-            time_buffer=0.1,
-            input_dir="input",
-            output_dir=tempfile.mkdtemp(),
-            reference_file="references/tripleS.md",
-            temperature=0.0,
-            font_name="PingFang TC",
-            font_size=12,
-            outline_width=0,
-            box_background=True,
-            margin_v=20,
-            margin_h=10,
-            alignment=2,
-            stage_cooldown=0,
-            subtitle_delivery="legacy",
-        )
-        transcribed = [{"start": 0.0, "end": 1.0, "text": "hello"}]
-        translated = [{"start": 0.0, "end": 1.0, "text": "你好"}]
-
-        try:
-            config = PipelineConfig(**vars(args))
-            with patch("hermecho.pipeline.extract_audio", return_value=audio_path), \
-                patch("hermecho.pipeline.transcribe_audio", return_value=transcribed), \
-                patch("hermecho.pipeline.translate_segments", return_value=translated), \
-                patch("hermecho.pipeline.adjust_subtitle_timing", return_value=translated), \
-                patch("hermecho.pipeline.generate_srt"), \
-                patch("hermecho.pipeline.is_portrait_video", return_value=False), \
-                patch("hermecho.pipeline.load_reference_material", return_value=""):
-                cli.process_video(config)
-        finally:
-            if os.path.exists(audio_path):
-                os.unlink(audio_path)
-
     def test_pipeline_resumes_accepted_translation_chunks_after_interruption(self) -> None:
         source_segments = [
             {"start": float(index), "end": float(index + 1), "text": f"line {index}"}
@@ -694,7 +613,6 @@ class TestPipelineOrchestration(unittest.TestCase):
             transcription_backend="whisper",
             srt_only=True,
             stage_cooldown=0,
-            subtitle_delivery="legacy",
         )
         requests = []
         interrupted = False
@@ -711,11 +629,11 @@ class TestPipelineOrchestration(unittest.TestCase):
         try:
             with patch("hermecho.pipeline.extract_audio", side_effect=audio_paths), \
                 patch("hermecho.pipeline.transcribe_audio", return_value=source_segments) as transcribe, \
+                patch("hermecho.pipeline.build_source_sentences", return_value=source_segments), \
                 patch("hermecho.pipeline.is_portrait_video", return_value=False), \
                 patch("hermecho.pipeline.load_reference_material", return_value=""), \
                 patch("hermecho.pipeline.load_locked_terms", return_value={}), \
-                patch("hermecho.pipeline.adjust_subtitle_timing", side_effect=lambda cues, *_args, **_kwargs: cues), \
-                patch("hermecho.pipeline.apply_delivery_profile", side_effect=self._checkpoint_delivery), \
+                patch("hermecho.pipeline.build_delivery_cues", side_effect=self._checkpoint_delivery), \
                 patch("hermecho.pipeline.delivery_gate_report", return_value="ok"), \
                 patch("hermecho.pipeline.generate_srt"), \
                 patch("hermecho.translation.TOKEN_THRESHOLD", 1), \
@@ -746,17 +664,16 @@ class TestPipelineOrchestration(unittest.TestCase):
             transcription_backend="whisper",
             srt_only=True,
             stage_cooldown=0,
-            subtitle_delivery="legacy",
         )
 
         try:
             with patch("hermecho.pipeline.extract_audio", side_effect=audio_paths), \
                 patch("hermecho.pipeline.transcribe_audio", return_value=source_segments) as transcribe, \
+                patch("hermecho.pipeline.build_source_sentences", return_value=source_segments), \
                 patch("hermecho.pipeline.is_portrait_video", return_value=False), \
                 patch("hermecho.pipeline.load_reference_material", side_effect=["first reference", "changed reference"]), \
                 patch("hermecho.pipeline.load_locked_terms", return_value={}), \
-                patch("hermecho.pipeline.adjust_subtitle_timing", side_effect=lambda cues, *_args, **_kwargs: cues), \
-                patch("hermecho.pipeline.apply_delivery_profile", side_effect=self._checkpoint_delivery), \
+                patch("hermecho.pipeline.build_delivery_cues", side_effect=self._checkpoint_delivery), \
                 patch("hermecho.pipeline.delivery_gate_report", return_value="ok"), \
                 patch("hermecho.pipeline.generate_srt"), \
                 patch("hermecho.translation._translate_chunk", side_effect=self._checkpoint_response) as translate:
@@ -781,17 +698,16 @@ class TestPipelineOrchestration(unittest.TestCase):
             transcription_backend="whisper",
             srt_only=True,
             stage_cooldown=0,
-            subtitle_delivery="legacy",
         )
 
         try:
             with patch("hermecho.pipeline.extract_audio", side_effect=audio_paths), \
                 patch("hermecho.pipeline.transcribe_audio", return_value=source_segments) as transcribe, \
+                patch("hermecho.pipeline.build_source_sentences", return_value=source_segments), \
                 patch("hermecho.pipeline.is_portrait_video", return_value=False), \
                 patch("hermecho.pipeline.load_reference_material", return_value=""), \
                 patch("hermecho.pipeline.load_locked_terms", return_value={}), \
-                patch("hermecho.pipeline.adjust_subtitle_timing", side_effect=lambda cues, *_args, **_kwargs: cues), \
-                patch("hermecho.pipeline.apply_delivery_profile", side_effect=self._checkpoint_delivery), \
+                patch("hermecho.pipeline.build_delivery_cues", side_effect=self._checkpoint_delivery), \
                 patch("hermecho.pipeline.delivery_gate_report", return_value="ok"), \
                 patch("hermecho.pipeline.generate_srt"), \
                 patch("hermecho.translation._translate_chunk", side_effect=self._checkpoint_response) as translate:
@@ -819,18 +735,17 @@ class TestPipelineOrchestration(unittest.TestCase):
             transcription_backend="whisper",
             srt_only=True,
             stage_cooldown=0,
-            subtitle_delivery="legacy",
         )
         force_config = PipelineConfig(**{**base_config.__dict__, "force": True})
 
         try:
             with patch("hermecho.pipeline.extract_audio", side_effect=audio_paths), \
                 patch("hermecho.pipeline.transcribe_audio", return_value=source_segments) as transcribe, \
+                patch("hermecho.pipeline.build_source_sentences", return_value=source_segments), \
                 patch("hermecho.pipeline.is_portrait_video", return_value=False), \
                 patch("hermecho.pipeline.load_reference_material", return_value=""), \
                 patch("hermecho.pipeline.load_locked_terms", return_value={}), \
-                patch("hermecho.pipeline.adjust_subtitle_timing", side_effect=lambda cues, *_args, **_kwargs: cues), \
-                patch("hermecho.pipeline.apply_delivery_profile", side_effect=self._checkpoint_delivery), \
+                patch("hermecho.pipeline.build_delivery_cues", side_effect=self._checkpoint_delivery), \
                 patch("hermecho.pipeline.delivery_gate_report", return_value="ok"), \
                 patch("hermecho.pipeline.generate_srt"), \
                 patch("hermecho.translation._translate_chunk", side_effect=self._checkpoint_response) as translate:
