@@ -136,25 +136,25 @@ def process_video(config: PipelineConfig) -> None:
                 "temperature": config.temperature,
             }
         )
-        transcribed_segments = (
+        transcription_segments = (
             None
             if config.force
             else checkpoint_store.load_transcription(transcription_fingerprint)
         )
-        if transcribed_segments is None:
-            transcribed_segments = transcribe_audio(
+        if transcription_segments is None:
+            transcription_segments = transcribe_audio(
                 audio_path,
                 model=config.model,
                 language=config.language,
                 temperature=config.temperature,
                 backend=transcription_backend,
             )
-            if not transcribed_segments:
+            if not transcription_segments:
                 emit_progress("transcription", "error", "Audio transcription failed")
                 return
             checkpoint_store.save_transcription(
                 transcription_fingerprint,
-                transcribed_segments,
+                transcription_segments,
             )
         else:
             print("Reusing completed transcription checkpoint.")
@@ -162,32 +162,32 @@ def process_video(config: PipelineConfig) -> None:
             "transcription",
             "complete",
             "Audio transcribed",
-            current=len(transcribed_segments),
-            total=len(transcribed_segments),
+            current=len(transcription_segments),
+            total=len(transcription_segments),
             pct=100,
         )
 
         _print_segments(
             f"Original Transcription ({config.language or 'auto'})",
-            transcribed_segments,
+            transcription_segments,
         )
 
         if config.transcribe_only:
-            transcribed_segments = split_long_segments(transcribed_segments)
-            transcribed_segments = [
+            transcript_segments = split_long_segments(transcription_segments)
+            transcript_segments = [
                 segment
-                for segment in transcribed_segments
+                for segment in transcript_segments
                 if segment.get("text", "").strip() != "[no speech]"
             ]
-            _print_segments("Transcription after Splitting", transcribed_segments)
+            _print_segments("Transcription after Splitting", transcript_segments)
         else:
             try:
-                transcribed_segments = build_source_sentences(transcribed_segments)
+                source_sentences = build_source_sentences(transcription_segments)
             except SentenceFirstError as error:
                 print(f"Sentence-first delivery blocked: {error}")
                 emit_progress("subtitle_delivery", "error", str(error))
                 return
-            _print_segments("Source Sentences", transcribed_segments)
+            _print_segments("Source Sentences", source_sentences)
 
         os.makedirs(output_dir, exist_ok=True)
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -196,7 +196,7 @@ def process_video(config: PipelineConfig) -> None:
             next_stage("Writing Transcript SRT")
             srt_path = os.path.join(output_dir, f"{video_name}_{timestamp}_transcript.srt")
             emit_progress("source_srt_write", "running", "Writing transcript SRT")
-            generate_srt(transcribed_segments, srt_path)
+            generate_srt(transcript_segments, srt_path)
             emit_progress(
                 "source_srt_write",
                 "complete",
@@ -225,7 +225,7 @@ def process_video(config: PipelineConfig) -> None:
                 f"{video_name}_{timestamp}_transcript_source.srt",
             )
             emit_progress("source_srt_write", "running", "Writing source transcript SRT")
-            generate_srt(transcribed_segments, source_srt)
+            generate_srt(source_sentences, source_srt)
             emit_progress(
                 "source_srt_write",
                 "complete",
@@ -246,7 +246,7 @@ def process_video(config: PipelineConfig) -> None:
                 "model": config.translation_model,
                 "prompt": translation_prompt_fingerprint(),
                 "reference": reference_material or "",
-                "source": fingerprint_data(transcribed_segments),
+                "source": fingerprint_data(source_sentences),
                 "target_language": config.target_language,
                 # Preserve matching checkpoints created before legacy delivery retired.
                 "subtitle_delivery": "sentence-first",
@@ -280,8 +280,8 @@ def process_video(config: PipelineConfig) -> None:
                 translations,
             )
 
-        translated_segments = translate_segments(
-            transcribed_segments,
+        translated_sentences = translate_segments(
+            source_sentences,
             target_language=config.target_language,
             translation_model=config.translation_model,
             reference_material=reference_material,
@@ -290,21 +290,21 @@ def process_video(config: PipelineConfig) -> None:
             accepted_chunk_saver=save_accepted_chunk,
         )
 
-        if translated_segments is not None:
+        if translated_sentences is not None:
             emit_progress(
                 "translation",
                 "complete",
                 "Translation completed",
-                current=len(translated_segments),
-                total=len(transcribed_segments),
+                current=len(translated_sentences),
+                total=len(source_sentences),
                 pct=100,
             )
             translation_label = f"Translation ({config.target_language})"
-            _print_segments(translation_label, translated_segments)
+            _print_segments(translation_label, translated_sentences)
 
             profile = delivery_profile_for_orientation(is_portrait)
             delivery_result = build_delivery_cues(
-                translated_segments,
+                translated_sentences,
                 profile,
                 fit_repair=lambda sentence, delivery_profile: fit_repair_translation_sentence(
                     sentence,
@@ -343,7 +343,7 @@ def process_video(config: PipelineConfig) -> None:
                     detail=report_path,
                 )
                 return
-            final_subtitle_segments = delivery_result.cues
+            delivery_cues = delivery_result.cues
             emit_progress(
                 "delivery_gate",
                 "complete",
@@ -354,16 +354,16 @@ def process_video(config: PipelineConfig) -> None:
                 "subtitle_timing_adjustment",
                 "complete",
                 "Subtitle timing adjusted",
-                current=len(final_subtitle_segments),
-                total=len(translated_segments),
+                current=len(delivery_cues),
+                total=len(translated_sentences),
                 pct=100,
             )
-            _print_segments("Adjusted Subtitles", final_subtitle_segments)
+            _print_segments("Adjusted Subtitles", delivery_cues)
 
             next_stage("Writing Subtitle SRT")
             srt_path = os.path.join(output_dir, f"{video_name}_{timestamp}_subtitles.srt")
             emit_progress("translated_srt_write", "running", "Writing translated SRT")
-            generate_srt(final_subtitle_segments, srt_path)
+            generate_srt(delivery_cues, srt_path)
             emit_progress(
                 "translated_srt_write",
                 "complete",
