@@ -1,6 +1,6 @@
 ---
 name: run-hermecho-job
-description: Run, resume, monitor, diagnose, and verify long-running Hermecho video transcription, Traditional Chinese translation, subtitle delivery, ASR comparison, or sentence-first comparison jobs. Use for Hermecho CLI operations, especially interrupted runs, checkpoint reuse, Delivery Gate verification, and comparison evidence generation. Do not use for changing Hermecho source code or approving comparison evidence.
+description: Run, resume, monitor, diagnose, and verify long-running Hermecho video transcription, Traditional Chinese translation, subtitle delivery, or ASR comparison jobs. Use for Hermecho CLI operations, especially interrupted runs, checkpoint reuse, Delivery Gate verification, and comparison evidence generation. Do not use for changing Hermecho source code or approving comparison evidence.
 ---
 
 # Run Hermecho Job
@@ -13,7 +13,6 @@ Choose exactly one mode from the request:
 
 - Standard pipeline: `conda run -n hermecho hermecho <video_filename>` with only the requested flags.
 - ASR Comparison Run: `conda run -n hermecho python -m hermecho.asr_comparison <video_path>`.
-- Sentence-first Comparison Run: `conda run -n hermecho python -m hermecho.sentence_first_comparison <video_path>`.
 
 Use `README.md` and each command's `--help` as the current source of truth for flags and artifacts. For a standard input outside `input/`, pass its basename as `video_filename` and its parent with `--input_dir`; do not copy the media merely to satisfy the CLI.
 
@@ -22,7 +21,7 @@ Use `README.md` and each command's `--help` as the current source of truth for f
 1. Work from the Hermecho repository root. Read `AGENTS.md`, `README.md`, and the relevant request or plan; run `git status --short --branch` without altering tracked files.
 2. Resolve the exact input file, mode, requested flags, output directory, and expected artifacts. Require the input to exist as a readable regular file. Ask only when one of these materially changes the job.
 3. Run the selected command's `--help` inside the `hermecho` Conda environment. If the environment, package, or selected module is unavailable, report the exact failure and stop; do not install or upgrade dependencies without approval.
-4. Before an ASR Comparison Run or any standard or sentence-first command that explicitly selects `--transcription-backend mlx`, require Apple Silicon and use Hermecho's `validate_mlx_backend` check for the selected model. Report its actionable error and stop when MLX cannot run.
+4. Before an ASR Comparison Run or any standard command that explicitly selects `--transcription-backend mlx`, require Apple Silicon and use Hermecho's `validate_mlx_backend` check for the selected model. Report its actionable error and stop when MLX cannot run.
 5. Confirm `ffmpeg` is available. For burn-in and Comparison Runs, also confirm the `subtitles` filter is present.
 6. For translated runs, confirm `OPENROUTER_API_KEY` is available without printing its value, and confirm the Locked Terms file exists and is a valid JSON object. Keep the reference file separate from Locked Terms.
 7. Confirm the output parent is writable and has reasonable free space. Require an empty output directory for a Comparison Run; never delete or overwrite an existing comparison directory without explicit permission.

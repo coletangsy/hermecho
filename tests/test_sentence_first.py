@@ -6,7 +6,6 @@ from hermecho.sentence_first import (
     SentenceFirstError,
     build_delivery_cues,
     build_source_sentences,
-    resolve_subtitle_delivery,
 )
 
 
@@ -377,13 +376,6 @@ class TestSentenceFirstDelivery(unittest.TestCase):
                 for diagnostic in result.diagnostics
             )
         )
-
-
-class TestSentenceFirstPromotion(unittest.TestCase):
-    def test_auto_defaults_to_sentence_first_after_promotion(self) -> None:
-        self.assertEqual(resolve_subtitle_delivery("auto"), "sentence-first")
-        self.assertEqual(resolve_subtitle_delivery("legacy"), "legacy")
-        self.assertEqual(resolve_subtitle_delivery("sentence-first"), "sentence-first")
 
 
 if __name__ == "__main__":

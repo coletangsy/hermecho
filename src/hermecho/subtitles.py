@@ -1,7 +1,6 @@
 """
 This module contains functions for generating, adjusting, and cleaning subtitles.
 """
-import logging
 import math
 import unicodedata
 from dataclasses import dataclass
@@ -593,108 +592,6 @@ def split_long_segments(segments: List[Dict], max_chars: int = 40, max_duration:
                     current_chunk_words = []
                     
     return split_segments
-
-
-def fill_transcription_gaps(
-    transcribed_segments: List[Dict],
-    gap_threshold: float = 5.0,
-    placeholder: str = "[no speech]",
-) -> List[Dict]:
-    """
-    Identifies and fills significant time gaps in a transcription with placeholder text.
-
-    This function iterates through the transcribed segments and checks the time difference
-    between the end of one segment and the start of the next. If the gap exceeds the
-    specified threshold, a new placeholder segment is inserted.
-
-    Args:
-        transcribed_segments: The list of transcription segments from Whisper.
-        gap_threshold: The minimum duration (in seconds) of a gap to be filled.
-        placeholder: The text to insert for the gap.
-
-    Returns:
-        A new list of segments with gaps filled.
-    """
-    if not transcribed_segments:
-        return []
-
-    filled_segments = [transcribed_segments[0]]
-    for i in range(len(transcribed_segments) - 1):
-        current_seg = transcribed_segments[i]
-        next_seg = transcribed_segments[i + 1]
-
-        gap = next_seg["start"] - current_seg["end"]
-
-        if gap > gap_threshold:
-            logging.warning(
-                f"Gap of {gap:.2f}s detected. Inserting placeholder."
-            )
-            filled_segments.append({
-                "text": placeholder,
-                "start": current_seg["end"],
-                "end": next_seg["start"]
-            })
-        
-        filled_segments.append(next_seg)
-    
-    return filled_segments
-
-
-def adjust_subtitle_timing(
-    segments: List[Dict],
-    time_buffer: float,
-    silence_boundaries: Optional[List[float]] = None,
-) -> List[Dict]:
-    """
-    Adjusts subtitle timings to fill gaps and ensures a consistent reading pace.
-
-    This function extends the duration of each subtitle to meet the start of the next one,
-    minus a small buffer. It helps prevent subtitles from flashing on the screen too quickly.
-
-    Args:
-        segments: A list of subtitle segments (can be transcribed or translated).
-        time_buffer: The buffer time (in seconds) to maintain between subtitles.
-        silence_boundaries: Silence-start times that subtitle cues must not cross.
-
-    Returns:
-        The adjusted list of segments.
-    """
-    time_buffer = max(0, time_buffer)
-
-    if not segments:
-        return []
-
-    adjusted_segments = [seg.copy() for seg in segments]
-    silence_boundaries = sorted(silence_boundaries or [])
-
-    for i in range(len(adjusted_segments) - 1):
-        current_segment = adjusted_segments[i]
-        next_segment = adjusted_segments[i + 1]
-        original_end = current_segment['end']
-
-        # The ideal end time for the current segment is the start of the next one minus the buffer.
-        new_end_time = next_segment['start'] - time_buffer
-        silence_start = next(
-            (
-                boundary
-                for boundary in silence_boundaries
-                if current_segment['start'] < boundary < next_segment['start']
-            ),
-            None,
-        )
-        if silence_start is not None:
-            new_end_time = min(new_end_time, silence_start)
-
-        # Update the end time. This extends shorter segments and shortens longer ones.
-        current_segment['end'] = new_end_time
-
-        # Keep the source's positive duration when the requested buffer cannot fit.
-        if current_segment['end'] <= current_segment['start']:
-            current_segment['end'] = original_end
-
-    # The last segment's end time is not modified as there's no next segment to overlap with.
-
-    return adjusted_segments
 
 
 def generate_srt(

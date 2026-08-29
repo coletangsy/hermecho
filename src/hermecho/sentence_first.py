@@ -17,32 +17,8 @@ from .subtitles import (
 TERMINAL_PUNCTUATION = frozenset("。！？!?；;…．.")
 DEFAULT_PAUSE_THRESHOLD = 0.8
 DEFAULT_SAFETY_DURATION = 20.0
-REVIEW_CHECKS = (
-    "translation completeness",
-    "meaning boundaries",
-    "timing",
-    "readability",
-    "locked terms",
-    "punctuation",
-    "presentation warnings",
-)
-
-
 class SentenceFirstError(ValueError):
     """Raised when immutable Source Word evidence is not usable."""
-
-
-def resolve_subtitle_delivery(requested: str) -> str:
-    """Resolve the promoted default delivery mode."""
-    if requested == "sentence-first":
-        return requested
-    if requested == "legacy":
-        return requested
-    if requested == "auto":
-        return "sentence-first"
-    raise ValueError(
-        f"Unknown subtitle delivery '{requested}'. Choose auto, legacy, or sentence-first."
-    )
 
 
 def _timestamp(value: Any, label: str) -> float:
