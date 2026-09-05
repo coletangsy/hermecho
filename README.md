@@ -117,6 +117,12 @@ hermecho clip.mp4 --save-source-transcript
 hermecho clip.mp4 --input_dir ./videos --output_dir ./exports
 ```
 
+For agent-operated jobs, use [run-hermecho-job](.agents/skills/run-hermecho-job/SKILL.md).
+Monitoring an existing session does not launch another process. Transcribe-only
+runs do not need translation credentials or Locked Terms; translated and comparison
+runs validate both before starting. Verify the expected artifacts and gate reports
+even when the CLI exits with status zero.
+
 The full pipeline is:
 
 ```text

@@ -9,21 +9,21 @@ Operate the repository's existing CLI safely. Do not add another runner, duplica
 
 ## Select the mode
 
-Choose exactly one mode from the request:
+For a new job, select the requested mode. For monitoring or diagnosis of an existing job, recover its command and session first; do not launch a new job merely to inspect it.
 
 - Standard pipeline: `conda run -n hermecho hermecho <video_filename>` with only the requested flags.
 - ASR Comparison Run: `conda run -n hermecho python -m hermecho.asr_comparison <video_path>`.
 
-Use `README.md` and each command's `--help` as the current source of truth for flags and artifacts. For a standard input outside `input/`, pass its basename as `video_filename` and its parent with `--input_dir`; do not copy the media merely to satisfy the CLI.
+Use [README.md](../../../README.md) and each command's `--help` as the current source of truth for flags and artifacts. Standard and comparison options use different spellings (for example, `--output_dir` versus `--output-dir`); do not transfer flags between them without checking. For a standard input outside `input/`, pass its basename as `video_filename` and its parent with `--input_dir`; quote paths and do not copy the media merely to satisfy the CLI.
 
 ## Preflight
 
 1. Work from the Hermecho repository root. Read `AGENTS.md`, `README.md`, and the relevant request or plan; run `git status --short --branch` without altering tracked files.
 2. Resolve the exact input file, mode, requested flags, output directory, and expected artifacts. Require the input to exist as a readable regular file. Ask only when one of these materially changes the job.
-3. Run the selected command's `--help` inside the `hermecho` Conda environment. If the environment, package, or selected module is unavailable, report the exact failure and stop; do not install or upgrade dependencies without approval.
-4. Before an ASR Comparison Run or any standard command that explicitly selects `--transcription-backend mlx`, require Apple Silicon and use Hermecho's `validate_mlx_backend` check for the selected model. Report its actionable error and stop when MLX cannot run.
+3. Run the selected command's `--help` inside the `hermecho` Conda environment. If the environment, package, or selected module is unavailable, report the exact failure. Install or upgrade only when already authorized by the task; otherwise stop at the missing prerequisite.
+4. Before an ASR Comparison Run or any standard command that explicitly selects `--transcription-backend mlx`, require Apple Silicon and call `hermecho.transcription.validate_mlx_backend` for the selected model. A returned error string means failure; `None` means the check passed. Leave `auto` selection to Hermecho and its approved comparison evidence.
 5. Confirm `ffmpeg` is available. For burn-in and Comparison Runs, also confirm the `subtitles` filter is present.
-6. For translated runs, confirm `OPENROUTER_API_KEY` is available without printing its value, and confirm the Locked Terms file exists and is a valid JSON object. Keep the reference file separate from Locked Terms.
+6. For translated runs, including Comparison Runs, load the repo's `.env` as the CLI does and check only whether `OPENROUTER_API_KEY` is present; never print its value. Validate Locked Terms with `hermecho.utils.load_locked_terms`, treating `None` as failure: a generic JSON-object check misses duplicate keys and invalid string pairs. Keep the optional reference file separate from Locked Terms. Transcribe-only runs do not require translation credentials or Locked Terms.
 7. Confirm the output parent is writable and has reasonable free space. Require an empty output directory for a Comparison Run; never delete or overwrite an existing comparison directory without explicit permission.
 
 ## Run and monitor
@@ -32,13 +32,13 @@ Use `README.md` and each command's `--help` as the current source of truth for f
 2. Start one process in a persistent execution session and monitor that session. Never launch a duplicate because output is temporarily quiet.
 3. Report meaningful stage transitions and keep the user updated during long stages. Avoid busy polling.
 4. On interruption or retry of a standard pipeline, run the same command. Let Hermecho reuse its matching transcription and Translation-Gate-approved chunk checkpoints.
-5. Treat Comparison Runs as non-resumable. Preserve a failed run's non-empty output for diagnosis; after approval, rerun the full comparison with a new empty `--output-dir` instead of deleting or reusing partial evidence.
+5. Treat Comparison Runs as non-resumable. Preserve a failed run's non-empty output for diagnosis. If the task authorizes another full comparison, use a new empty `--output-dir`; otherwise report the required rerun rather than repeating the full workload automatically.
 6. Do not add `--force` unless the user explicitly requests a full recomputation or evidence shows checkpoint reuse itself is the problem. Explain the lost work before using it.
 7. On failure, record the exit status, last completed stage, exact error, checkpoint path when applicable, and artifacts already written. Diagnose that stage before retrying; do not restart blindly.
 
 ## Verify a standard run
 
-Compare the output inventory from before and after the run; do not select an artifact only because it is the newest unrelated file.
+Compare the output inventory from before and after the run; do not select an artifact only because it is the newest unrelated file. Exit status zero alone is insufficient: some CLI failure paths print an error and return normally. Require the expected artifacts and gate results below.
 
 - Transcribe-only: require a non-empty `*_transcript.srt`.
 - SRT-only: require a non-empty `*_subtitles.srt` and matching `*_delivery_gate.txt`.
