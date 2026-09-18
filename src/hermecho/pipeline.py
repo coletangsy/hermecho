@@ -47,7 +47,7 @@ class PipelineConfig:
     transcription_backend: str = "auto"
     language: Optional[str] = None
     target_language: str = "Traditional Chinese (Taiwan)"
-    translation_model: str = "deepseek/deepseek-v4-pro"
+    translation_model: str = "deepseek/deepseek-v4.1-flash"
     time_buffer: float = 0.1
     input_dir: str = "input"
     output_dir: str = "output"

@@ -97,7 +97,7 @@ class TestOpenRouterTranslation(unittest.TestCase):
             translated, usage = _translate_chunk(
                 [{"start": 0.0, "end": 1.0, "text": "hello"}],
                 target_language="Traditional Chinese (Taiwan)",
-                translation_model="deepseek/deepseek-v4-pro",
+                translation_model="deepseek/deepseek-v4.1-flash",
                 reference_material=None,
                 context={},
             )
@@ -133,7 +133,7 @@ class TestOpenRouterTranslation(unittest.TestCase):
             translated, usage = _translate_chunk(
                 [{"start": 0.0, "end": 1.0, "text": "hello"}],
                 target_language="Traditional Chinese (Taiwan)",
-                translation_model="deepseek/deepseek-v4-pro",
+                translation_model="deepseek/deepseek-v4.1-flash",
                 reference_material=None,
                 context={},
             )
@@ -149,7 +149,7 @@ class TestOpenRouterTranslation(unittest.TestCase):
         )
         client.chat.completions.create.assert_called_once()
         kwargs = client.chat.completions.create.call_args.kwargs
-        self.assertEqual(kwargs["model"], "deepseek/deepseek-v4-pro")
+        self.assertEqual(kwargs["model"], "deepseek/deepseek-v4.1-flash")
         self.assertEqual(kwargs["response_format"], {"type": "json_object"})
         self.assertEqual(kwargs["messages"][0]["role"], "user")
         self.assertIn("hello", kwargs["messages"][0]["content"])

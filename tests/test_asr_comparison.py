@@ -106,7 +106,7 @@ class TestAsrComparisonEvidence(unittest.TestCase):
                         },
                         "translation": {
                             "provider": "OpenRouter",
-                            "model": "deepseek/deepseek-v4-pro",
+                            "model": "deepseek/deepseek-v4.1-flash",
                             "target_language": "Traditional Chinese (Taiwan)",
                         },
                         "subtitle_style": {
@@ -127,7 +127,7 @@ class TestAsrComparisonEvidence(unittest.TestCase):
                             "language": "ko",
                             "temperature": 0.0,
                             "target_language": "Traditional Chinese (Taiwan)",
-                            "translation_model": "deepseek/deepseek-v4-pro",
+                            "translation_model": "deepseek/deepseek-v4.1-flash",
                             "reference_file": "references/tripleS.md",
                             "locked_terms_file": "references/locked_terms.json",
                             "time_buffer": 0.1,
@@ -346,7 +346,7 @@ class TestComparisonRun(unittest.TestCase):
                 temperature=0.2,
                 reference_file=Path("references/tripleS.md"),
                 locked_terms_file=Path("references/locked_terms.json"),
-                translation_model="deepseek/deepseek-v4-pro",
+                translation_model="deepseek/deepseek-v4.1-flash",
             )
             with patch("hermecho.asr_comparison.subprocess.run", side_effect=fake_run):
                 run_comparison(config)
