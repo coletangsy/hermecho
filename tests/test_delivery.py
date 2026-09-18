@@ -349,7 +349,6 @@ class TestDeliveryProfiles(unittest.TestCase):
         self.assertTrue(
             {
                 "empty_piece",
-                "non_positive_duration",
                 "reversed_timing",
                 "overlap_timing",
                 "missing_source_word_timing",
@@ -357,6 +356,27 @@ class TestDeliveryProfiles(unittest.TestCase):
                 "invalid_timing",
             }.issubset({diagnostic.code for diagnostic in result.diagnostics})
         )
+
+    def test_zero_duration_cue_is_omitted_without_blocking_delivery(self) -> None:
+        portrait = delivery_profile_for_orientation(is_portrait=True)
+        result = apply_delivery_profile(
+            [
+                {"start": 2.0, "end": 2.0, "text": "甲"},
+                {"start": 3.0, "end": 4.0, "text": "乙"},
+            ],
+            portrait,
+        )
+
+        self.assertFalse(result.blocked)
+        self.assertEqual([cue["text"] for cue in result.cues], ["乙"])
+        zero_duration = [
+            diagnostic
+            for diagnostic in result.diagnostics
+            if diagnostic.code == "non_positive_duration"
+        ]
+        self.assertEqual(len(zero_duration), 1)
+        self.assertEqual(zero_duration[0].severity, "Warning")
+        self.assertEqual(zero_duration[0].message, "zero-duration cue was omitted")
 
     def test_negative_cue_and_source_word_timing_are_structural(self) -> None:
         portrait = delivery_profile_for_orientation(is_portrait=True)
@@ -472,7 +492,7 @@ class TestDeliveryProfiles(unittest.TestCase):
             ],
             portrait,
         )
-        structural = apply_delivery_profile(
+        omitted = apply_delivery_profile(
             [
                 {"start": 0.0, "end": 1.0, "text": "", "source_text": "[no speech]"},
                 {"start": 2.0, "end": 2.0, "text": "乙"},
@@ -482,8 +502,8 @@ class TestDeliveryProfiles(unittest.TestCase):
 
         self.assertIn("Warning cue 1: duration", delivery_gate_report(warning, portrait))
         self.assertIn(
-            "Structural Defect cue 1: non_positive_duration",
-            delivery_gate_report(structural, portrait),
+            "Warning cue 1: non_positive_duration (zero-duration cue was omitted)",
+            delivery_gate_report(omitted, portrait),
         )
 
 
@@ -542,7 +562,10 @@ class TestDeliveryPipeline(unittest.TestCase):
             srt_only=True,
             stage_cooldown=0,
         )
-        translated = [{"start": 0.0, "end": 0.0, "text": "甲"}]
+        translated = [
+            {"start": 0.0, "end": 2.0, "text": "甲"},
+            {"start": 1.0, "end": 3.0, "text": "乙"},
+        ]
 
         try:
             with patch("hermecho.pipeline.extract_audio", return_value=audio_path), \
@@ -572,6 +595,61 @@ class TestDeliveryPipeline(unittest.TestCase):
         self.assertEqual(len(report_paths), 1)
         with open(report_paths[0], encoding="utf-8") as report_file:
             self.assertIn("Structural Defect", report_file.read())
+
+    def test_zero_duration_cue_is_omitted_without_stopping_final_srt(self) -> None:
+        with tempfile.NamedTemporaryFile(suffix=".mp3", delete=False) as audio_file:
+            audio_path = audio_file.name
+        output_dir = tempfile.mkdtemp()
+        config = PipelineConfig(
+            video_filename="portrait.mp4",
+            input_dir="input",
+            output_dir=output_dir,
+            srt_only=True,
+            stage_cooldown=0,
+        )
+        translated = [
+            {"start": 0.0, "end": 0.0, "text": "省略"},
+            {"start": 1.0, "end": 2.0, "text": "保留"},
+        ]
+
+        try:
+            with patch("hermecho.pipeline.extract_audio", return_value=audio_path), \
+                patch("hermecho.pipeline.transcribe_audio", return_value=translated), \
+                patch("hermecho.pipeline.build_source_sentences", return_value=translated), \
+                patch("hermecho.pipeline.translate_segments", return_value=translated), \
+                patch(
+                    "hermecho.pipeline.build_delivery_cues",
+                    side_effect=lambda cues, profile, **_kwargs: apply_delivery_profile(
+                        cues, profile
+                    ),
+                ), \
+                patch("hermecho.pipeline.load_reference_material", return_value=""), \
+                patch("hermecho.pipeline.is_portrait_video", return_value=True):
+                process_video(config)
+        finally:
+            if os.path.exists(audio_path):
+                os.unlink(audio_path)
+
+        output_files = [
+            os.path.join(root, filename)
+            for root, _, filenames in os.walk(output_dir)
+            for filename in filenames
+        ]
+        srt_paths = [path for path in output_files if path.endswith(".srt")]
+        report_paths = [path for path in output_files if path.endswith("_delivery_gate.txt")]
+        self.assertEqual(len(srt_paths), 1)
+        self.assertEqual(len(report_paths), 1)
+        with open(srt_paths[0], encoding="utf-8") as srt_file:
+            srt = srt_file.read()
+        self.assertNotIn("省略", srt)
+        self.assertIn("保留", srt)
+        with open(report_paths[0], encoding="utf-8") as report_file:
+            report = report_file.read()
+        self.assertIn(
+            "Warning cue 1: non_positive_duration (zero-duration cue was omitted)",
+            report,
+        )
+        self.assertIn("Structural Defects: 0", report)
 
 
 if __name__ == "__main__":
