@@ -333,11 +333,13 @@ def apply_delivery_profile(
             )
             continue
         if math.isclose(end, start, abs_tol=1e-9):
-            _structural_diagnostic(
-                diagnostics,
-                cue_index,
-                "non_positive_duration",
-                "cue duration is zero",
+            diagnostics.append(
+                DeliveryDiagnostic(
+                    "Warning",
+                    "non_positive_duration",
+                    cue_index,
+                    "zero-duration cue was omitted",
+                )
             )
             continue
         if negative_timestamp:

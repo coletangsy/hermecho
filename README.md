@@ -11,7 +11,7 @@ Hermecho translates videos with Korean audio into Traditional Chinese (Taiwan) s
 - SRT-only, transcribe-only, and full burn-in modes.
 - Subtitle styling controls for font, size, background box, margins, and ASS alignment.
 - `ffmpeg` subtitle-filter detection before burn-in.
-- Deterministic portrait and landscape Delivery Profiles measure subtitle width in Visual Cells and wrap to at most two lines. Every translated run writes a Delivery Gate report; presentation limits use Best-effort Delivery, while structural timing defects block final output.
+- Deterministic portrait and landscape Delivery Profiles measure subtitle width in Visual Cells and wrap to at most two lines. Every translated run writes a Delivery Gate report; presentation limits use Best-effort Delivery, zero-duration cues are omitted with a warning, and other structural timing defects block final output.
 - Sentence-first delivery preserves Source Word timing and translates complete Source Sentences before shaping Delivery Cues.
 
 The current pipeline does not include multimodal transcription, transcription prompts, keyword extraction, or timing-review stages.

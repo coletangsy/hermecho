@@ -173,7 +173,7 @@ class TestSentenceFirstDelivery(unittest.TestCase):
 
         self.assertFalse(result.blocked)
 
-    def test_isolated_point_timed_word_remains_blocked(self) -> None:
+    def test_isolated_point_timed_word_is_omitted_without_blocking(self) -> None:
         result = build_delivery_cues(
             [
                 {
@@ -187,10 +187,15 @@ class TestSentenceFirstDelivery(unittest.TestCase):
             profile=None,
         )
 
-        self.assertTrue(result.blocked)
-        self.assertTrue(
-            any(diagnostic.code == "non_positive_duration" for diagnostic in result.diagnostics)
-        )
+        self.assertFalse(result.blocked)
+        self.assertEqual(result.cues, [])
+        zero_duration = [
+            diagnostic
+            for diagnostic in result.diagnostics
+            if diagnostic.code == "non_positive_duration"
+        ]
+        self.assertEqual(len(zero_duration), 1)
+        self.assertEqual(zero_duration[0].severity, "Warning")
 
     def test_cps_repair_runs_before_alignment_and_rechecks_the_result(self) -> None:
         fit_repair = Mock(return_value="短句。")
