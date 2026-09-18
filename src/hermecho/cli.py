@@ -54,7 +54,7 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     )
     parser.add_argument(
         "--translation_model",
-        default="deepseek/deepseek-v4-pro",
+        default="deepseek/deepseek-v4.1-flash",
         help="OpenRouter model slug for translation.",
     )
     parser.add_argument("--time_buffer", type=float, default=0.1, help="Buffer time between subtitles in seconds.")

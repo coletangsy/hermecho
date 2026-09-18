@@ -74,7 +74,7 @@ OPENROUTER_API_KEY="your_openrouter_key"
 ```
 
 Translation uses OpenRouter's OpenAI-compatible API. The default model is
-`deepseek/deepseek-v4-pro`, and requests prefer Alibaba first, then
+`deepseek/deepseek-v4.1-flash`, and requests prefer Alibaba first, then
 AtlasCloud FP8, with provider fallback enabled.
 
 Check `ffmpeg` subtitle support:
@@ -154,7 +154,7 @@ Run `hermecho --help` for the full list.
 | `--transcription-backend` | `auto`, `whisper`, or Apple-Silicon-only `mlx`. `auto` selects MLX only with approved faster local comparison evidence; otherwise it uses Whisper. MLX supports `large` / `large-v3` as large-v3. |
 | `--language` | Source audio language, auto-detected by default. |
 | `--target_language` | Translation target, default `Traditional Chinese (Taiwan)`. |
-| `--translation_model` | OpenRouter model slug, default `deepseek/deepseek-v4-pro`. |
+| `--translation_model` | OpenRouter model slug, default `deepseek/deepseek-v4.1-flash`. |
 | `--reference_file` | Translation reference material, default `references/tripleS.md`. |
 | `--locked-terms-file` | Required JSON source-to-target mapping for translated runs; defaults to `references/locked_terms.json`. Missing or invalid mappings block translation and final SRT/MP4 delivery. |
 | `--temperature` | Whisper sampling temperature, default `0.0`. |

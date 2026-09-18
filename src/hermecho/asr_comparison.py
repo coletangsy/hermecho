@@ -45,7 +45,7 @@ class ComparisonConfig:
     temperature: float = 0.0
     reference_file: Path = Path("references/tripleS.md")
     locked_terms_file: Path = Path("references/locked_terms.json")
-    translation_model: str = "deepseek/deepseek-v4-pro"
+    translation_model: str = "deepseek/deepseek-v4.1-flash"
     target_language: str = "Traditional Chinese (Taiwan)"
     start: str = DEFAULT_START
     end: str = DEFAULT_END
@@ -944,7 +944,7 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> ComparisonConfig:
     parser.add_argument("--temperature", type=float, default=0.0)
     parser.add_argument("--reference-file", type=Path, default=Path("references/tripleS.md"))
     parser.add_argument("--locked-terms-file", type=Path, default=Path("references/locked_terms.json"))
-    parser.add_argument("--translation-model", default="deepseek/deepseek-v4-pro")
+    parser.add_argument("--translation-model", default="deepseek/deepseek-v4.1-flash")
     parser.add_argument("--target-language", default="Traditional Chinese (Taiwan)")
     parser.add_argument("--time-buffer", type=float, default=0.1)
     parser.add_argument("--font-name", default="Heiti TC")

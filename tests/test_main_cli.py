@@ -50,7 +50,7 @@ class TestCliArguments(unittest.TestCase):
         self.assertEqual(config.transcription_backend, "auto")
         self.assertIsNone(config.language)
         self.assertEqual(config.target_language, "Traditional Chinese (Taiwan)")
-        self.assertEqual(config.translation_model, "deepseek/deepseek-v4-pro")
+        self.assertEqual(config.translation_model, "deepseek/deepseek-v4.1-flash")
         self.assertEqual(config.locked_terms_file, "references/locked_terms.json")
         self.assertEqual(config.font_name, "Heiti TC")
         self.assertEqual(
