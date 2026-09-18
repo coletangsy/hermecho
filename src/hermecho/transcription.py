@@ -2,6 +2,7 @@
 Local Whisper transcription with an optional MLX backend.
 """
 import importlib.util
+import math
 import os
 import platform
 from pathlib import Path
@@ -79,6 +80,8 @@ def _normalise_mlx_result(result: Any) -> tuple[str, List[Dict]]:
         raise RuntimeError("MLX Whisper returned an invalid detected language.")
 
     normalised_segments: List[Dict] = []
+    excluded_segments = 0
+    excluded_words = 0
     for segment in result["segments"]:
         text = segment.get("text") if isinstance(segment, dict) else None
         words = segment.get("words") if isinstance(segment, dict) else None
@@ -96,23 +99,56 @@ def _normalise_mlx_result(result: Any) -> tuple[str, List[Dict]]:
         ):
             raise RuntimeError("MLX Whisper returned an invalid Source Word timestamp.")
         try:
-            normalised_segment = dict(segment)
-            normalised_segment["start"] = float(segment["start"])
-            normalised_segment["end"] = float(segment["end"])
-            normalised_segment["text"] = text
-            normalised_segment["words"] = [
-                {
-                    **word,
-                    "word": word["word"],
-                    "start": float(word["start"]),
-                    "end": float(word["end"]),
-                }
-                for word in words
-            ]
+            start = float(segment["start"])
+            end = float(segment["end"])
         except (KeyError, TypeError, ValueError) as error:
             raise RuntimeError("MLX Whisper returned invalid segment timestamps.") from error
+        if not math.isfinite(start) or not math.isfinite(end) or start > end:
+            excluded_segments += 1
+            continue
 
-        normalised_segments.append(normalised_segment)
+        normalised_words = []
+        invalid_word_timestamp = False
+        for word in words:
+            try:
+                word_start = float(word["start"])
+                word_end = float(word["end"])
+            except (KeyError, TypeError, ValueError) as error:
+                raise RuntimeError("MLX Whisper returned invalid Source Word timestamp.") from error
+            if (
+                not math.isfinite(word_start)
+                or not math.isfinite(word_end)
+                or word_start > word_end
+            ):
+                excluded_words += 1
+                invalid_word_timestamp = True
+                break
+            normalised_words.append(
+                {
+                    "word": word["word"],
+                    "start": word_start,
+                    "end": word_end,
+                }
+            )
+        if invalid_word_timestamp:
+            excluded_segments += 1
+            continue
+
+        normalised_segments.append(
+            {
+                "start": start,
+                "end": end,
+                "text": text,
+                "words": normalised_words,
+            }
+        )
+
+    if excluded_segments or excluded_words:
+        print(
+            "Warning: MLX Whisper excluded "
+            f"{excluded_segments} segment(s) and {excluded_words} word(s) "
+            "with non-finite or reversed timestamps."
+        )
 
     return detected_language, normalised_segments
 

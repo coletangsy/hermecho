@@ -168,7 +168,7 @@ Run `hermecho --help` for the full list.
 | `--stage-cooldown` | Delay between stages, default `60`; use `0` to disable. |
 | `--force` | Recompute all stages instead of reusing completed checkpoints. |
 
-Outputs are written under `output/<video_basename>/` with a `YYYYMMDD_HHMMSS` timestamp. Each video also keeps one versioned, atomic `.hermecho-checkpoint.json`: matching completed transcription and Translation-Gate-approved chunks resume automatically; `--force` bypasses it. Translated runs also write a matching `*_delivery_gate.txt` report with any presentation warnings, Repair Limits, or Structural Defects.
+Outputs are written under `output/<video_basename>/` with a `YYYYMMDD_HHMMSS` timestamp. Each video also keeps one versioned, atomic `.hermecho-checkpoint.json`: matching completed transcription and Translation-Gate-approved chunks resume automatically; `--force` bypasses it. MLX transcription skips segments with non-finite or reversed segment or word timestamps before checkpointing and reports the exclusions as a warning. Translated runs also write a matching `*_delivery_gate.txt` report with any presentation warnings, Repair Limits, or Structural Defects.
 
 ## Hermecho Cloud rollout
 

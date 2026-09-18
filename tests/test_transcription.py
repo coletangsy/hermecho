@@ -1,4 +1,5 @@
 import importlib.util
+import json
 import os
 import sys
 import types
@@ -7,6 +8,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
+from hermecho.checkpoints import CheckpointStore
 from hermecho.transcription import (
     _normalise_mlx_result,
     resolve_transcription_backend,
@@ -138,7 +140,23 @@ class TestTranscribeAudio(unittest.TestCase):
                             backend="mlx",
                         )
 
-                        self.assertEqual(out, mlx_result["segments"])
+                        self.assertEqual(
+                            out,
+                            [
+                                {
+                                    "start": 0.0,
+                                    "end": 1.0,
+                                    "text": " 안녕",
+                                    "words": [
+                                        {
+                                            "word": " 안녕",
+                                            "start": 0.0,
+                                            "end": 1.0,
+                                        }
+                                    ],
+                                }
+                            ],
+                        )
                         fake_mlx.transcribe.assert_called_once_with(
                             path,
                             path_or_hf_repo="mlx-community/whisper-large-v3-mlx",
@@ -156,6 +174,66 @@ class TestTranscribeAudio(unittest.TestCase):
         self.assertIsInstance(out[0]["start"], float)
         self.assertIsInstance(out[0]["words"][0]["start"], float)
         mock_print.assert_any_call("MLX Whisper detected language: ko")
+
+    def test_mlx_excludes_non_finite_values_before_checkpointing(self) -> None:
+        _language, segments = _normalise_mlx_result(
+            {
+                "language": "ko",
+                "segments": [
+                    {
+                        "start": 0,
+                        "end": 1,
+                        "text": "valid",
+                        "avg_logprob": float("nan"),
+                        "words": [
+                            {
+                                "word": "valid",
+                                "start": 0,
+                                "end": 1,
+                                "probability": float("nan"),
+                            }
+                        ],
+                    },
+                    {
+                        "start": float("nan"),
+                        "end": 2,
+                        "text": "invalid segment",
+                        "words": [],
+                    },
+                    {
+                        "start": 2,
+                        "end": 3,
+                        "text": "valid segment, invalid word",
+                        "words": [
+                            {
+                                "word": "invalid word",
+                                "start": float("nan"),
+                                "end": 3,
+                            }
+                        ],
+                    },
+                ],
+            }
+        )
+
+        self.assertEqual(
+            segments,
+            [
+                {
+                    "start": 0.0,
+                    "end": 1.0,
+                    "text": "valid",
+                    "words": [{"word": "valid", "start": 0.0, "end": 1.0}],
+                }
+            ],
+        )
+        json.dumps(segments, allow_nan=False)
+
+        with tempfile.TemporaryDirectory() as temporary_dir:
+            checkpoint_path = str(Path(temporary_dir) / "checkpoint.json")
+            store = CheckpointStore(checkpoint_path)
+            store.save_transcription("mlx", segments)
+            self.assertEqual(store.load_transcription("mlx"), segments)
 
     def test_mlx_skips_blank_segments_without_source_words(self) -> None:
         _language, segments = _normalise_mlx_result(
