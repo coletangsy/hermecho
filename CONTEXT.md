@@ -20,6 +20,10 @@ _Avoid_: Translated segment, subtitle sentence
 A subtitle unit shown during a bounded time interval under layout and reading constraints. It is derived from one Translation Sentence and Source Word timing evidence.
 _Avoid_: Segment, translation segment
 
+**Rendered Line**:
+One visible row of subtitle text in the delivered video. Renderer wrapping can create more Rendered Lines than the explicit line breaks in a Delivery Cue.
+_Avoid_: SRT line, Delivery Cue
+
 **Delivery Profile**:
 The layout and reading constraints used to derive Delivery Cues for a viewing format such as portrait or landscape. It does not alter the accepted Translation Sentence.
 _Avoid_: Subtitle text, translation style
