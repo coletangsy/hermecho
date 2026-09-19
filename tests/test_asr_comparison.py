@@ -118,7 +118,6 @@ class TestAsrComparisonEvidence(unittest.TestCase):
                             "margin_v": 20,
                             "margin_h": 10,
                             "alignment": 2,
-                            "time_buffer": 0.1,
                         },
                         "effective_cli_options": {
                             "video_filename": "media_range.mp4",
@@ -130,7 +129,6 @@ class TestAsrComparisonEvidence(unittest.TestCase):
                             "translation_model": "deepseek/deepseek-v4.1-flash",
                             "reference_file": "references/tripleS.md",
                             "locked_terms_file": "references/locked_terms.json",
-                            "time_buffer": 0.1,
                             "font_name": "Heiti TC",
                             "fonts_dir": "/System/fonts",
                             "font_size": 12,
@@ -361,6 +359,8 @@ class TestComparisonRun(unittest.TestCase):
             )
             self.assertEqual(manifest["shared"]["translation"]["provider"], "OpenRouter")
             self.assertEqual(manifest["shared"]["subtitle_style"]["font_name"], "Heiti TC")
+            self.assertNotIn("time_buffer", manifest["shared"]["subtitle_style"])
+            self.assertNotIn("time_buffer", manifest["shared"]["effective_cli_options"])
             self.assertEqual(
                 manifest["shared"]["subtitle_style"]["fonts_dir"],
                 cli.parse_args(["clip.mp4"]).fonts_dir,
@@ -416,6 +416,7 @@ class TestComparisonRun(unittest.TestCase):
             for args in child_cli_args:
                 self.assertEqual(args[args.index("--fonts-dir") + 1], default_fonts_dir)
                 self.assertIn("--box_background", args)
+                self.assertNotIn("--time_buffer", args)
             range_command = next(
                 command
                 for command in commands

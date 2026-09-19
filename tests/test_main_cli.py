@@ -24,6 +24,7 @@ class TestCliArguments(unittest.TestCase):
             "--no-timing-review",
             "--timing-review-model",
             "--timing-review-chunk-seconds",
+            "--time_buffer",
         ]
 
         for flag in removed_flags:
@@ -34,6 +35,7 @@ class TestCliArguments(unittest.TestCase):
                 "--initial_prompt",
                 "--timing-review-model",
                 "--timing-review-chunk-seconds",
+                "--time_buffer",
             }:
                 argv.append("value")
             with self.subTest(flag=flag), patch.object(sys, "argv", argv):
@@ -470,7 +472,6 @@ class TestPipelineOrchestration(unittest.TestCase):
             language="ko",
             target_language="Traditional Chinese (Taiwan)",
             translation_model="openrouter-test",
-            time_buffer=0.25,
             input_dir="input",
             output_dir=tempfile.mkdtemp(),
             reference_file="references/tripleS.md",
@@ -513,7 +514,7 @@ class TestPipelineOrchestration(unittest.TestCase):
             backend="whisper",
         )
         self.assertEqual(deliver.call_args.args[0], translated)
-        self.assertEqual(deliver.call_args.kwargs["time_buffer"], 0.25)
+        self.assertNotIn("time_buffer", deliver.call_args.kwargs)
         generate_srt.assert_called_once_with(adjusted, generate_srt.call_args.args[1])
         self.assertEqual(generate_srt.call_args.args[0][0]["text"], "你好，世界。")
 

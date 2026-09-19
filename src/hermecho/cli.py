@@ -57,7 +57,6 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
         default="deepseek/deepseek-v4.1-flash",
         help="OpenRouter model slug for translation.",
     )
-    parser.add_argument("--time_buffer", type=float, default=0.1, help="Buffer time between subtitles in seconds.")
     parser.add_argument("--input_dir", default="input", help="The directory where the input video is located.")
     parser.add_argument("--output_dir", default="output", help="The directory where the output files will be saved.")
     parser.add_argument("--reference_file", default="references/tripleS.md", help="Optional path to a reference file.")

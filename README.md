@@ -141,7 +141,8 @@ mapping enforced by the Translation Gate; a missing or invalid mapping blocks
 translation and final SRT/MP4 delivery. `--reference_file` remains separate
 Markdown prompt context. Accepted translations preserve punctuation for both
 landscape and portrait delivery; portrait processing may wrap or split cues but
-does not remove accepted punctuation.
+does not remove accepted punctuation. Delivery Cues end at their last mapped
+Source Word timestamp; the pipeline does not extend them into the following gap.
 
 ## Options
 
@@ -158,7 +159,6 @@ Run `hermecho --help` for the full list.
 | `--reference_file` | Translation reference material, default `references/tripleS.md`. |
 | `--locked-terms-file` | Required JSON source-to-target mapping for translated runs; defaults to `references/locked_terms.json`. Missing or invalid mappings block translation and final SRT/MP4 delivery. |
 | `--temperature` | Whisper sampling temperature, default `0.0`. |
-| `--time_buffer` | Seconds between subtitle cues after timing adjustment. |
 | `--transcribe-only` | Write source-language SRT and stop. |
 | `--srt-only` | Write translated SRT and skip video burn-in. |
 | `--save-source-transcript` | Also write source-language SRT during a translated run. |

@@ -342,12 +342,9 @@ def build_delivery_cues(
     *,
     fit_repair: Optional[Callable[[Dict, DeliveryProfile], Optional[str]]] = None,
     align: Optional[Callable[[Dict], Optional[List[Dict]]]] = None,
-    time_buffer: float = 0.1,
 ) -> DeliveryGateResult:
     """Turn accepted Translation Sentences into timed Delivery Cues."""
     profile = profile or PORTRAIT_DELIVERY_PROFILE
-    if time_buffer < 0:
-        raise ValueError("Delivery time buffer must not be negative.")
     cues: List[Dict] = []
     diagnostics: List[DeliveryDiagnostic] = []
     for sentence_index, sentence in enumerate(translated_sentences, start=1):
@@ -411,11 +408,6 @@ def build_delivery_cues(
             if alignment_succeeded:
                 continue
         cues.append(cue)
-
-    for index in range(len(cues) - 1):
-        next_start = cues[index + 1]["start"]
-        if next_start > cues[index]["end"]:
-            cues[index]["end"] = min(next_start, cues[index]["end"] + time_buffer)
 
     result = apply_delivery_profile(cues, profile)
     diagnostics.extend(result.diagnostics)

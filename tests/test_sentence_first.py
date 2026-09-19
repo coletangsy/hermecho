@@ -220,7 +220,7 @@ class TestSentenceFirstDelivery(unittest.TestCase):
         fit_repair.assert_called_once()
         align.assert_not_called()
 
-    def test_alignment_preserves_text_covers_words_and_extends_into_gap(self) -> None:
+    def test_alignment_preserves_text_and_source_word_boundaries(self) -> None:
         from hermecho.subtitles import DeliveryProfile
 
         profile = DeliveryProfile(
@@ -259,14 +259,13 @@ class TestSentenceFirstDelivery(unittest.TestCase):
             ],
             profile,
             align=align,
-            time_buffer=0.2,
         )
 
         self.assertFalse(result.blocked)
         self.assertEqual([cue["text"] for cue in result.cues], ["甲乙", "丙丁"])
         self.assertEqual(result.cues[0]["source_word_indices"], [5, 6])
         self.assertEqual(result.cues[1]["source_word_indices"], [7, 8])
-        self.assertEqual(result.cues[0]["end"], 0.7)
+        self.assertEqual(result.cues[0]["end"], 0.5)
         self.assertEqual(result.cues[1]["start"], 1.0)
         align.assert_called_once()
 
