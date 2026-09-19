@@ -15,6 +15,7 @@ from .progress import emit_progress
 from .prompts import (
     build_alignment_prompt,
     build_fit_repair_prompt,
+    build_source_boundary_review_prompt,
     build_translation_prompt,
 )
 
@@ -44,6 +45,16 @@ def translation_prompt_fingerprint() -> str:
         source = inspect.getsource(build_translation_prompt)
     except (OSError, TypeError):
         code = build_translation_prompt.__code__
+        source = repr((code.co_code, code.co_consts))
+    return hashlib.sha256(source.encode("utf-8")).hexdigest()
+
+
+def source_boundary_prompt_fingerprint() -> str:
+    """Return a fingerprint for the ambiguous Source Sentence review prompt."""
+    try:
+        source = inspect.getsource(build_source_boundary_review_prompt)
+    except (OSError, TypeError):
+        code = build_source_boundary_review_prompt.__code__
         source = repr((code.co_code, code.co_consts))
     return hashlib.sha256(source.encode("utf-8")).hexdigest()
 
@@ -357,13 +368,32 @@ def fit_repair_translation_sentence(
     return accepted.get("0") if not defects else None
 
 
+def review_source_sentence_boundaries(
+    candidates: List[Dict],
+    *,
+    translation_model: str,
+) -> Optional[Any]:
+    """Ask OpenRouter for one untrusted batch of ambiguous boundary decisions."""
+    prompt = build_source_boundary_review_prompt(candidates)
+    response, _usage = _request_json_translation(
+        prompt,
+        translation_model,
+        label="Source Boundary Review",
+    )
+    return response
+
+
 def align_translation_sentence(
     sentence: Dict,
     *,
     target_language: str,
     translation_model: str,
+    profile: Any = None,
+    feedback: Optional[List[str]] = None,
 ) -> Optional[List[Dict]]:
     """Ask for an unchanged target-to-Source-Word mapping."""
+    profile = profile or sentence.get("_delivery_profile")
+    feedback = feedback or sentence.get("_delivery_feedback", [])
     source_words = [
         {"source_word_index": index, **word}
         for index, word in zip(
@@ -376,6 +406,8 @@ def align_translation_sentence(
         str(sentence.get("text", "")),
         source_words,
         target_language,
+        profile=profile,
+        feedback=feedback,
     )
     response, _usage = _request_json_translation(
         prompt,

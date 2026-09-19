@@ -9,7 +9,9 @@ from unittest.mock import MagicMock, patch
 from hermecho.subtitles import PORTRAIT_DELIVERY_PROFILE
 from hermecho.translation import (
     _translate_chunk,
+    align_translation_sentence,
     fit_repair_translation_sentence,
+    review_source_sentence_boundaries,
     translate_segments,
 )
 from hermecho.utils import load_locked_terms
@@ -533,6 +535,64 @@ class TestOpenRouterTranslation(unittest.TestCase):
             )
 
         self.assertEqual(repaired, "短句。")
+
+    def test_source_boundary_review_uses_one_batch_request(self) -> None:
+        response = {"decisions": [{"boundary_index": 0, "merge": True}]}
+        with patch(
+            "hermecho.translation._request_json_translation",
+            return_value=(response, None),
+        ) as request:
+            reviewed = review_source_sentence_boundaries(
+                [
+                    {
+                        "boundary_index": 0,
+                        "start": 0.0,
+                        "end": 1.0,
+                        "gap": 0.1,
+                        "reason": "short pause",
+                        "left": {"text": "안녕.", "start": 0.0, "end": 0.4, "source_word_indices": [0]},
+                        "right": {"text": "하세요.", "start": 0.5, "end": 1.0, "source_word_indices": [1]},
+                    }
+                ],
+                translation_model="test-model",
+            )
+
+        self.assertEqual(reviewed, response)
+        request.assert_called_once()
+        prompt = request.call_args.args[0]
+        self.assertIn("Review only the listed ambiguous boundaries", prompt)
+        self.assertIn("boundary_index", prompt)
+        self.assertEqual(request.call_args.kwargs["label"], "Source Boundary Review")
+
+    def test_alignment_prompt_contains_profile_and_previous_failures(self) -> None:
+        with patch(
+            "hermecho.translation._request_json_translation",
+            return_value=(
+                {"pieces": [{"text": "甲乙", "end_source_word_index": 1}]},
+                None,
+            ),
+        ) as request:
+            pieces = align_translation_sentence(
+                {
+                    "source_text": "안녕.",
+                    "text": "甲乙",
+                    "source_words": [
+                        {"word": "안", "start": 0.0, "end": 0.4},
+                        {"word": "녕.", "start": 0.4, "end": 1.0},
+                    ],
+                    "source_word_indices": [0, 1],
+                    "_delivery_feedback": ["rendered_lines: 2 exceeds target 1"],
+                },
+                target_language="Traditional Chinese (Taiwan)",
+                translation_model="test-model",
+                profile=PORTRAIT_DELIVERY_PROFILE,
+            )
+
+        self.assertEqual(pieces, [{"text": "甲乙", "end_source_word_index": 1}])
+        prompt = request.call_args.args[0]
+        self.assertIn("Delivery Profile", prompt)
+        self.assertIn("rendered_lines", prompt)
+        self.assertIn("Source Word", prompt)
 
     def test_translate_segments_saves_only_gate_accepted_chunks(self) -> None:
         segments = [{"start": 0.0, "end": 1.0, "text": "first"}]

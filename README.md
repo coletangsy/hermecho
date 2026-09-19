@@ -13,6 +13,8 @@ Hermecho translates videos with Korean audio into Traditional Chinese (Taiwan) s
 - `ffmpeg` subtitle-filter detection before burn-in.
 - Deterministic portrait and landscape Delivery Profiles measure subtitle width in Visual Cells and wrap to at most two lines. Every translated run writes a Delivery Gate report; presentation limits use Best-effort Delivery, zero-duration cues are omitted with a warning, and other structural timing defects block final output.
 - Sentence-first delivery preserves Source Word timing and translates complete Source Sentences before shaping Delivery Cues.
+- Short or apparently incomplete Source Sentence boundaries are reviewed in one batched request; clear boundaries stay deterministic and accepted grouping decisions resume from the checkpoint.
+- Delivery Cues aim for one Rendered Line and 1–7 seconds. Alignment candidates are validated for exact text coverage, continuous Source Word ranges, Visual Cells, reading speed, duration, and cue count; unresolved presentation limits remain visible in the report while complete text is retained.
 
 The current pipeline does not include multimodal transcription, transcription prompts, keyword extraction, or timing-review stages.
 
@@ -143,6 +145,14 @@ Markdown prompt context. Accepted translations preserve punctuation for both
 landscape and portrait delivery; portrait processing may wrap or split cues but
 does not remove accepted punctuation. Delivery Cues end at their last mapped
 Source Word timestamp; the pipeline does not extend them into the following gap.
+Full translated runs review only suspicious short or incomplete Source Sentence
+boundaries before translation. The review can merge adjacent spans after strict
+Source Word text and coverage validation; an invalid response falls back to the
+deterministic grouping and records its time range. `--transcribe-only` keeps its
+existing source SRT path. Alignment can split a Translation Sentence into
+sequential Delivery Cues, then merges short adjacent candidates when the merged
+cue still meets the profile. A Delivery Gate report also records suspiciously
+long Source Word spans without changing their timestamps.
 
 ## Options
 
@@ -168,7 +178,7 @@ Run `hermecho --help` for the full list.
 | `--stage-cooldown` | Delay between stages, default `60`; use `0` to disable. |
 | `--force` | Recompute all stages instead of reusing completed checkpoints. |
 
-Outputs are written under `output/<video_basename>/` with a `YYYYMMDD_HHMMSS` timestamp. Each video also keeps one versioned, atomic `.hermecho-checkpoint.json`: matching completed transcription and Translation-Gate-approved chunks resume automatically; `--force` bypasses it. MLX transcription skips segments with non-finite or reversed segment or word timestamps before checkpointing and reports the exclusions as a warning. Translated runs also write a matching `*_delivery_gate.txt` report with any presentation warnings, Repair Limits, or Structural Defects.
+Outputs are written under `output/<video_basename>/` with a `YYYYMMDD_HHMMSS` timestamp. Each video also keeps one versioned, atomic `.hermecho-checkpoint.json`: matching completed transcription, accepted Source Sentence grouping, and Translation-Gate-approved chunks resume automatically; changing the grouping fingerprint invalidates downstream translation chunks; `--force` bypasses it. MLX transcription skips segments with non-finite or reversed segment or word timestamps before checkpointing and reports the exclusions as a warning. Translated runs also write a matching `*_delivery_gate.txt` report with cue and Rendered Line counts, short and long cue counts, presentation warnings, Repair Limits, Structural Defects, Source Sentence review findings, and suspicious Source Word timing ranges.
 
 ## Hermecho Cloud rollout
 

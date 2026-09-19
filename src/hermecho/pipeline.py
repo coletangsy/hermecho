@@ -21,6 +21,8 @@ from .sentence_first import (
     SentenceFirstError,
     build_delivery_cues,
     build_source_sentences,
+    diagnose_source_word_timing,
+    review_ambiguous_source_boundaries,
 )
 from .transcription import (
     resolve_transcription_backend,
@@ -30,6 +32,8 @@ from .transcription import (
 from .translation import (
     align_translation_sentence,
     fit_repair_translation_sentence,
+    review_source_sentence_boundaries,
+    source_boundary_prompt_fingerprint,
     translate_segments,
     translation_prompt_fingerprint,
 )
@@ -180,12 +184,60 @@ def process_video(config: PipelineConfig) -> None:
             ]
             _print_segments("Transcription after Splitting", transcript_segments)
         else:
+            reference_material = load_reference_material(config.reference_file)
+            locked_terms = load_locked_terms(config.locked_terms_file)
+            if locked_terms is None:
+                emit_progress(
+                    "translation_gate",
+                    "error",
+                    "Locked Terms configuration is invalid",
+                )
+                return
+            source_timing_diagnostics = diagnose_source_word_timing(
+                transcription_segments
+            )
             try:
-                source_sentences = build_source_sentences(transcription_segments)
+                deterministic_source_sentences = build_source_sentences(
+                    transcription_segments
+                )
             except SentenceFirstError as error:
                 print(f"Sentence-first delivery blocked: {error}")
                 emit_progress("subtitle_delivery", "error", str(error))
                 return
+            source_grouping_fingerprint = fingerprint_data(
+                {
+                    "transcription": transcription_fingerprint,
+                    "translation_model": config.translation_model,
+                    "prompt": source_boundary_prompt_fingerprint(),
+                    "grouping_rules": "source-sentence-v2",
+                }
+            )
+            source_grouping_diagnostics = []
+            source_sentences = (
+                None
+                if config.force
+                else checkpoint_store.load_source_sentences(source_grouping_fingerprint)
+            )
+            if source_sentences is None:
+                review_result = review_ambiguous_source_boundaries(
+                    deterministic_source_sentences,
+                    review=lambda candidates: review_source_sentence_boundaries(
+                        candidates,
+                        translation_model=config.translation_model,
+                    ),
+                )
+                source_sentences = review_result.sentences
+                source_grouping_diagnostics = review_result.diagnostics
+                if review_result.cacheable:
+                    try:
+                        checkpoint_store.save_source_sentences(
+                            source_grouping_fingerprint,
+                            source_sentences,
+                        )
+                    except ValueError as error:
+                        print(f"Warning: Source Sentence checkpoint skipped: {error}")
+            else:
+                print("Reusing completed Source Sentence grouping checkpoint.")
             _print_segments("Source Sentences", source_sentences)
 
         os.makedirs(output_dir, exist_ok=True)
@@ -208,15 +260,6 @@ def process_video(config: PipelineConfig) -> None:
             return
 
         is_portrait = is_portrait_video(video_path)
-        reference_material = load_reference_material(config.reference_file)
-        locked_terms = load_locked_terms(config.locked_terms_file)
-        if locked_terms is None:
-            emit_progress(
-                "translation_gate",
-                "error",
-                "Locked Terms configuration is invalid",
-            )
-            return
 
         if config.save_source_transcript:
             source_srt = os.path.join(
@@ -328,7 +371,12 @@ def process_video(config: PipelineConfig) -> None:
                 output_dir,
                 f"{video_name}_{timestamp}_delivery_gate.txt",
             )
-            report = delivery_gate_report(delivery_result, profile)
+            report = delivery_gate_report(
+                delivery_result,
+                profile,
+                source_grouping_diagnostics=source_grouping_diagnostics,
+                source_timing_diagnostics=source_timing_diagnostics,
+            )
             with open(report_path, "w", encoding="utf-8") as report_file:
                 report_file.write(report + "\n")
             print(report)

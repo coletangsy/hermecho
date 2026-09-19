@@ -4,7 +4,7 @@ This module contains functions for generating, adjusting, and cleaning subtitles
 import math
 import unicodedata
 from dataclasses import dataclass
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Sequence, Tuple
 
 PORTRAIT_SUBTITLE_PUNCTUATION = frozenset("，。！？；：、")
 DELIVERY_BREAK_PUNCTUATION = PORTRAIT_SUBTITLE_PUNCTUATION | frozenset(",.!?;:")
@@ -24,6 +24,8 @@ class DeliveryProfile:
     warning_max_duration: float = 7.0
     repair_min_duration: float = 0.5
     repair_max_duration: float = 10.0
+    target_rendered_lines: int = 1
+    max_rendered_lines: int = 2
 
 
 PORTRAIT_DELIVERY_PROFILE = DeliveryProfile(
@@ -48,6 +50,9 @@ class DeliveryDiagnostic:
     code: str
     cue_index: int
     message: str
+    start: Optional[float] = None
+    end: Optional[float] = None
+    outcome: Optional[str] = None
 
 
 @dataclass
@@ -85,6 +90,8 @@ def _presentation_diagnostic(
     warning_limit: float,
     repair_limit: float,
     unit: str,
+    start: Optional[float] = None,
+    end: Optional[float] = None,
 ) -> None:
     if value > repair_limit:
         severity = "Repair Limit"
@@ -100,6 +107,8 @@ def _presentation_diagnostic(
             code,
             cue_index,
             f"{value:g} {unit} exceeds {limit:g}",
+            start=start,
+            end=end,
         )
     )
 
@@ -109,8 +118,32 @@ def _structural_diagnostic(
     cue_index: int,
     code: str,
     message: str,
+    segment: Optional[Dict] = None,
 ) -> None:
-    diagnostics.append(DeliveryDiagnostic("Structural Defect", code, cue_index, message))
+    start, end = _segment_timing(segment)
+    diagnostics.append(
+        DeliveryDiagnostic(
+            "Structural Defect",
+            code,
+            cue_index,
+            message,
+            start=start,
+            end=end,
+        )
+    )
+
+
+def _segment_timing(segment: Optional[Dict]) -> Tuple[Optional[float], Optional[float]]:
+    if not isinstance(segment, dict):
+        return None, None
+    try:
+        start = float(segment["start"])
+        end = float(segment["end"])
+    except (KeyError, TypeError, ValueError):
+        return None, None
+    if not math.isfinite(start) or not math.isfinite(end):
+        return None, None
+    return start, end
 
 
 def _validate_source_words(
@@ -129,6 +162,7 @@ def _validate_source_words(
                 cue_index,
                 "missing_source_word_timing",
                 "mapped cue has no Source Word timing",
+                segment,
             )
         return
     if not isinstance(words, list) or not words:
@@ -137,6 +171,7 @@ def _validate_source_words(
             cue_index,
             "missing_source_word_timing",
             "cue Source Words are missing",
+            segment,
         )
         return
 
@@ -151,6 +186,7 @@ def _validate_source_words(
                 cue_index,
                 "missing_source_word_timing",
                 "a Source Word has no usable timing",
+                segment,
             )
             return
         if not math.isfinite(word_start) or not math.isfinite(word_end):
@@ -159,6 +195,7 @@ def _validate_source_words(
                 cue_index,
                 "invalid_source_word_timing",
                 "a Source Word has non-finite timing",
+                segment,
             )
             return
         if word_start < 0 or word_end < 0:
@@ -167,6 +204,7 @@ def _validate_source_words(
                 cue_index,
                 "invalid_source_word_timing",
                 "a Source Word has a negative timestamp",
+                segment,
             )
             return
         if word_end < word_start and not math.isclose(word_end, word_start, abs_tol=1e-9):
@@ -175,6 +213,7 @@ def _validate_source_words(
                 cue_index,
                 "invalid_source_word_timing",
                 "a Source Word has reversed timing",
+                segment,
             )
             return
         if (
@@ -187,6 +226,7 @@ def _validate_source_words(
                 cue_index,
                 "overlap_timing",
                 "Source Word timings overlap",
+                segment,
             )
             return
         previous_end = word_end
@@ -204,6 +244,7 @@ def _validate_source_words(
                 cue_index,
                 "invalid_source_coverage",
                 "Source Word indices must cover one continuous range",
+                segment,
             )
 
 
@@ -275,6 +316,84 @@ def _wrap_delivery_text(text: str, profile: DeliveryProfile) -> str:
     return f"{left}\n{right}"
 
 
+def estimated_rendered_line_count(text: str, profile: DeliveryProfile) -> int:
+    """Estimate the visible subtitle rows after Hermecho's deterministic wrap."""
+    wrapped = _wrap_delivery_text(text, profile)
+    return max(1, len(wrapped.splitlines()))
+
+
+def delivery_candidate_score(
+    result: DeliveryGateResult,
+    profile: Optional[DeliveryProfile] = None,
+) -> Tuple[int, int, int, int, int, int]:
+    """Return a stable score for choosing among valid Delivery Cue candidates.
+
+    Repair limits are considered before cue count so a single unreadable cue does
+    not win merely because it has fewer switches. Once candidates are usable,
+    the score prefers one-line cues, fewer short cues, fewer cues, and then fewer
+    warnings.
+    """
+    profile = profile or PORTRAIT_DELIVERY_PROFILE
+    structural = sum(
+        diagnostic.severity == "Structural Defect"
+        for diagnostic in result.diagnostics
+    )
+    repairs = sum(
+        diagnostic.severity == "Repair Limit"
+        for diagnostic in result.diagnostics
+    )
+    multiline = sum(
+        diagnostic.severity in {"Warning", "Repair Limit"}
+        and diagnostic.code == "rendered_lines"
+        for diagnostic in result.diagnostics
+    )
+    short_cues = sum(
+        diagnostic.code == "duration"
+        and diagnostic.severity in {"Warning", "Repair Limit"}
+        and diagnostic.start is not None
+        and diagnostic.end is not None
+        and diagnostic.end - diagnostic.start < profile.warning_min_duration
+        for diagnostic in result.diagnostics
+    )
+    warnings = sum(diagnostic.severity == "Warning" for diagnostic in result.diagnostics)
+    return (
+        structural,
+        repairs,
+        multiline,
+        short_cues,
+        len(result.cues),
+        warnings,
+    )
+
+
+def delivery_metrics(
+    result: DeliveryGateResult,
+    profile: DeliveryProfile,
+) -> Dict[str, int]:
+    """Summarize observable cue and Rendered Line metrics for comparisons."""
+    short_cues = 0
+    long_cues = 0
+    rendered_lines = 0
+    multiline_cues = 0
+    for cue in result.cues:
+        try:
+            duration = float(cue["end"]) - float(cue["start"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        line_count = estimated_rendered_line_count(str(cue.get("text", "")), profile)
+        rendered_lines += line_count
+        multiline_cues += line_count > profile.target_rendered_lines
+        short_cues += duration < profile.warning_min_duration
+        long_cues += duration > profile.warning_max_duration
+    return {
+        "cues": len(result.cues),
+        "rendered_lines": rendered_lines,
+        "multiline_cues": multiline_cues,
+        "short_cues": short_cues,
+        "long_cues": long_cues,
+    }
+
+
 def apply_delivery_profile(
     segments: List[Dict],
     profile: DeliveryProfile,
@@ -294,7 +413,11 @@ def apply_delivery_profile(
         cue_index += 1
         if not isinstance(text, str) or not text.strip():
             _structural_diagnostic(
-                diagnostics, cue_index, "empty_piece", "cue text is empty"
+                diagnostics,
+                cue_index,
+                "empty_piece",
+                "cue text is empty",
+                segment,
             )
             continue
         try:
@@ -306,6 +429,7 @@ def apply_delivery_profile(
                 cue_index,
                 "invalid_timing",
                 "cue start and end must be numeric",
+                segment,
             )
             continue
         if not math.isfinite(start) or not math.isfinite(end):
@@ -314,6 +438,7 @@ def apply_delivery_profile(
                 cue_index,
                 "invalid_timing",
                 "cue start and end must be finite",
+                segment,
             )
             continue
         negative_timestamp = start < 0 or end < 0
@@ -323,6 +448,7 @@ def apply_delivery_profile(
                 cue_index,
                 "invalid_timing",
                 "cue start and end must not be negative",
+                segment,
             )
         if end < start and not math.isclose(end, start, abs_tol=1e-9):
             _structural_diagnostic(
@@ -330,6 +456,7 @@ def apply_delivery_profile(
                 cue_index,
                 "reversed_timing",
                 "cue end precedes its start",
+                segment,
             )
             continue
         if math.isclose(end, start, abs_tol=1e-9):
@@ -339,6 +466,8 @@ def apply_delivery_profile(
                     "non_positive_duration",
                     cue_index,
                     "zero-duration cue was omitted",
+                    start=start,
+                    end=end,
                 )
             )
             continue
@@ -354,6 +483,7 @@ def apply_delivery_profile(
                 cue_index,
                 "overlap_timing",
                 "cue overlaps the previous cue",
+                segment,
             )
         previous_end = max(previous_end, end) if previous_end is not None else end
         _validate_source_words(segment, cue_index, diagnostics)
@@ -363,6 +493,19 @@ def apply_delivery_profile(
         cues.append(cue)
         duration = end - start
         cells = visual_cell_count(cue["text"])
+        rendered_lines = estimated_rendered_line_count(text, profile)
+        if rendered_lines > profile.target_rendered_lines:
+            diagnostics.append(
+                DeliveryDiagnostic(
+                    "Warning",
+                    "rendered_lines",
+                    cue_index,
+                    f"{rendered_lines} Rendered Lines exceeds target "
+                    f"{profile.target_rendered_lines}",
+                    start=start,
+                    end=end,
+                )
+            )
         _presentation_diagnostic(
             diagnostics,
             cue_index,
@@ -371,6 +514,8 @@ def apply_delivery_profile(
             profile.warning_cps,
             profile.repair_cps,
             "cells/s",
+            start,
+            end,
         )
         _presentation_diagnostic(
             diagnostics,
@@ -380,6 +525,8 @@ def apply_delivery_profile(
             profile.warning_cue_cells,
             profile.repair_cue_cells,
             "cells",
+            start,
+            end,
         )
         for line in cue["text"].splitlines() or [cue["text"]]:
             _presentation_diagnostic(
@@ -390,6 +537,8 @@ def apply_delivery_profile(
                 profile.warning_line_cells,
                 profile.repair_line_cells,
                 "cells",
+                start,
+                end,
             )
         if duration < profile.repair_min_duration or duration > profile.repair_max_duration:
             severity, limit = "Repair Limit", (
@@ -411,16 +560,34 @@ def apply_delivery_profile(
                 "duration",
                 cue_index,
                 f"{duration:g}s is outside the {limit:g}s limit",
+                start=start,
+                end=end,
             )
         )
 
     return DeliveryGateResult(cues, diagnostics)
 
 
-def delivery_gate_report(result: DeliveryGateResult, profile: DeliveryProfile) -> str:
+def delivery_gate_report(
+    result: DeliveryGateResult,
+    profile: DeliveryProfile,
+    *,
+    source_grouping_diagnostics: Optional[Sequence[object]] = None,
+    source_timing_diagnostics: Optional[Sequence[object]] = None,
+) -> str:
     """Return a compact, reviewable Delivery Gate report."""
     severities = ("Warning", "Repair Limit", "Structural Defect")
     lines = [f"Delivery Gate ({profile.name})"]
+    metrics = delivery_metrics(result, profile)
+    lines.extend(
+        [
+            f"Cues: {metrics['cues']}",
+            f"Rendered Lines: {metrics['rendered_lines']}",
+            f"Multiline Cues: {metrics['multiline_cues']}",
+            f"Short Cues: {metrics['short_cues']}",
+            f"Long Cues: {metrics['long_cues']}",
+        ]
+    )
     for severity in severities:
         count = sum(
             diagnostic.severity == severity for diagnostic in result.diagnostics
@@ -431,11 +598,36 @@ def delivery_gate_report(result: DeliveryGateResult, profile: DeliveryProfile) -
             "Structural Defect": "Structural Defects",
         }[severity]
         lines.append(f"{label}: {count}")
-    lines.extend(
-        f"{diagnostic.severity} cue {diagnostic.cue_index}: "
-        f"{diagnostic.code} ({diagnostic.message})"
-        for diagnostic in result.diagnostics
-    )
+    for diagnostic in result.diagnostics:
+        outcome = f"; outcome={diagnostic.outcome}" if diagnostic.outcome else ""
+        timing = ""
+        if diagnostic.start is not None and diagnostic.end is not None:
+            timing = f" [time={diagnostic.start:g}s–{diagnostic.end:g}s]"
+        lines.append(
+            f"{diagnostic.severity} cue {diagnostic.cue_index}: "
+            f"{diagnostic.code} ({diagnostic.message}{outcome}){timing}"
+        )
+    for label, source_diagnostics in (
+        ("Source Sentence Diagnostics", source_grouping_diagnostics or []),
+        ("Source Timing Diagnostics", source_timing_diagnostics or []),
+    ):
+        if not source_diagnostics:
+            continue
+        lines.append(f"{label}: {len(source_diagnostics)}")
+        for diagnostic in source_diagnostics:
+            start = getattr(diagnostic, "start", None)
+            end = getattr(diagnostic, "end", None)
+            location = ""
+            if start is not None and end is not None:
+                location = f" [{float(start):g}s–{float(end):g}s]"
+            message = str(getattr(diagnostic, "message", diagnostic))
+            outcome = getattr(diagnostic, "outcome", None)
+            if outcome:
+                message += f"; outcome={outcome}"
+            lines.append(
+                f"{label.removesuffix(' Diagnostics')} {getattr(diagnostic, 'code', 'finding')}"
+                f"{location}: {message}"
+            )
     return "\n".join(lines)
 
 
