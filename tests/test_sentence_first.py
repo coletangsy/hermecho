@@ -4,8 +4,11 @@ import unittest
 from hermecho.subtitles import PORTRAIT_DELIVERY_PROFILE
 from hermecho.sentence_first import (
     SentenceFirstError,
+    ambiguous_source_boundaries,
     build_delivery_cues,
     build_source_sentences,
+    diagnose_source_word_timing,
+    review_ambiguous_source_boundaries,
 )
 
 
@@ -105,6 +108,114 @@ class TestSourceSentences(unittest.TestCase):
 
         self.assertEqual(sentences[0]["end"], 8.1)
         self.assertEqual(len(sentences), 2)
+
+    def test_reviews_only_ambiguous_boundaries_and_preserves_source_evidence(self) -> None:
+        source_words = [
+            {"word": "안녕.", "start": 0.0, "end": 0.4},
+            {"word": "하세요.", "start": 0.45, "end": 0.8},
+        ]
+        sentences = build_source_sentences(
+            [
+                {
+                    "start": 0.0,
+                    "end": 0.4,
+                    "text": "안녕.",
+                    "words": [source_words[0]],
+                },
+                {
+                    "start": 0.45,
+                    "end": 0.8,
+                    "text": "하세요.",
+                    "words": [source_words[1]],
+                },
+            ]
+        )
+        candidates = ambiguous_source_boundaries(sentences)
+        self.assertEqual([candidate["boundary_index"] for candidate in candidates], [0])
+        review = Mock(
+            return_value={
+                "decisions": [
+                    {"boundary_index": 0, "merge": True, "text": "안녕하세요."}
+                ]
+            }
+        )
+
+        result = review_ambiguous_source_boundaries(sentences, review)
+
+        review.assert_called_once_with(candidates)
+        self.assertEqual([sentence["text"] for sentence in result.sentences], ["안녕하세요."])
+        self.assertEqual(result.sentences[0]["source_words"], source_words)
+        self.assertEqual(result.sentences[0]["source_word_indices"], [0, 1])
+        self.assertEqual((result.sentences[0]["start"], result.sentences[0]["end"]), (0.0, 0.8))
+        self.assertEqual(result.diagnostics, [])
+        self.assertTrue(result.cacheable)
+
+    def test_invalid_boundary_review_falls_back_with_time_diagnostic(self) -> None:
+        sentences = build_source_sentences(
+            [
+                {
+                    "start": 0.0,
+                    "end": 0.4,
+                    "text": "안녕.",
+                    "words": [{"word": "안녕.", "start": 0.0, "end": 0.4}],
+                },
+                {
+                    "start": 0.45,
+                    "end": 0.8,
+                    "text": "하세요.",
+                    "words": [{"word": "하세요.", "start": 0.45, "end": 0.8}],
+                },
+            ]
+        )
+
+        result = review_ambiguous_source_boundaries(
+            sentences,
+            lambda _candidates: {"decisions": []},
+        )
+
+        self.assertEqual([sentence["text"] for sentence in result.sentences], ["안녕.", "하세요."])
+        self.assertFalse(result.cacheable)
+        self.assertEqual(result.diagnostics[0].code, "source_boundary_review_failed")
+        self.assertEqual((result.diagnostics[0].start, result.diagnostics[0].end), (0.0, 0.8))
+
+    def test_clear_boundary_skips_review(self) -> None:
+        sentences = build_source_sentences(
+            [
+                {
+                    "start": 0.0,
+                    "end": 4.0,
+                    "text": "這是一個很長的完整來源句子。",
+                    "words": [{"word": "這是一個很長的完整來源句子。", "start": 0.0, "end": 4.0}],
+                },
+                {
+                    "start": 5.0,
+                    "end": 9.0,
+                    "text": "這是另一個完整句子。",
+                    "words": [{"word": "這是另一個完整句子。", "start": 5.0, "end": 9.0}],
+                },
+            ]
+        )
+        review = Mock()
+
+        result = review_ambiguous_source_boundaries(sentences, review)
+
+        review.assert_not_called()
+        self.assertEqual(len(result.sentences), 2)
+        self.assertEqual(result.diagnostics, [])
+
+    def test_long_source_word_is_diagnostic_only(self) -> None:
+        diagnostics = diagnose_source_word_timing(
+            [
+                {
+                    "text": "long",
+                    "words": [{"word": "long", "start": 1.0, "end": 9.2}],
+                }
+            ]
+        )
+
+        self.assertEqual(len(diagnostics), 1)
+        self.assertEqual(diagnostics[0].code, "long_source_word")
+        self.assertEqual((diagnostics[0].start, diagnostics[0].end), (1.0, 9.2))
 
 
 class TestSentenceFirstDelivery(unittest.TestCase):
@@ -220,7 +331,7 @@ class TestSentenceFirstDelivery(unittest.TestCase):
         fit_repair.assert_called_once()
         align.assert_not_called()
 
-    def test_alignment_preserves_text_covers_words_and_extends_into_gap(self) -> None:
+    def test_alignment_preserves_text_and_source_word_boundaries(self) -> None:
         from hermecho.subtitles import DeliveryProfile
 
         profile = DeliveryProfile(
@@ -259,14 +370,13 @@ class TestSentenceFirstDelivery(unittest.TestCase):
             ],
             profile,
             align=align,
-            time_buffer=0.2,
         )
 
         self.assertFalse(result.blocked)
         self.assertEqual([cue["text"] for cue in result.cues], ["甲乙", "丙丁"])
         self.assertEqual(result.cues[0]["source_word_indices"], [5, 6])
         self.assertEqual(result.cues[1]["source_word_indices"], [7, 8])
-        self.assertEqual(result.cues[0]["end"], 0.7)
+        self.assertEqual(result.cues[0]["end"], 0.5)
         self.assertEqual(result.cues[1]["start"], 1.0)
         align.assert_called_once()
 
@@ -357,6 +467,50 @@ class TestSentenceFirstDelivery(unittest.TestCase):
         self.assertTrue(
             any(diagnostic.severity == "Repair Limit" for diagnostic in result.diagnostics)
         )
+
+    def test_short_alignment_piece_merges_when_the_combined_cue_is_usable(self) -> None:
+        from hermecho.subtitles import DeliveryProfile
+
+        profile = DeliveryProfile(
+            name="test",
+            warning_line_cells=100,
+            repair_line_cells=100,
+            warning_cue_cells=100,
+            repair_cue_cells=100,
+            warning_cps=100,
+            repair_cps=100,
+            warning_min_duration=1.0,
+            warning_max_duration=7.0,
+            repair_min_duration=0.5,
+            repair_max_duration=10.0,
+        )
+        align = Mock(
+            return_value=[
+                {"text": "甲", "end_source_word_index": 0},
+                {"text": "乙", "end_source_word_index": 1},
+                {"text": "丙", "end_source_word_index": 2},
+            ]
+        )
+        result = build_delivery_cues(
+            [
+                {
+                    "start": 0.0,
+                    "end": 12.0,
+                    "text": "甲乙丙",
+                    "source_words": [
+                        {"word": "a", "start": 0.0, "end": 0.4},
+                        {"word": "b", "start": 0.4, "end": 4.0},
+                        {"word": "c", "start": 4.0, "end": 12.0},
+                    ],
+                    "source_word_indices": [0, 1, 2],
+                }
+            ],
+            profile,
+            align=align,
+        )
+
+        self.assertEqual([cue["text"] for cue in result.cues], ["甲乙", "丙"])
+        self.assertEqual(result.cues[0]["source_word_indices"], [0, 1])
 
     def test_unresolved_presentation_limit_is_best_effort_without_structural_failure(self) -> None:
         fit_repair = Mock(return_value=None)

@@ -7,6 +7,7 @@ import json
 import math
 import os
 import tempfile
+import unicodedata
 from typing import Any, Dict, List, Optional, Sequence
 
 
@@ -90,6 +91,77 @@ def _is_accepted_chunk(record: Any) -> bool:
     )
 
 
+def _source_content_signature(value: str) -> str:
+    return "".join(
+        character
+        for character in value
+        if not character.isspace()
+        and not unicodedata.category(character).startswith("P")
+    )
+
+
+def _is_source_sentence(sentence: Any) -> bool:
+    if not isinstance(sentence, dict):
+        return False
+    words = sentence.get("source_words")
+    indices = sentence.get("source_word_indices")
+    if (
+        not isinstance(sentence.get("text"), str)
+        or not sentence["text"].strip()
+        or not _is_finite_number(sentence.get("start"))
+        or not _is_finite_number(sentence.get("end"))
+        or sentence["start"] > sentence["end"]
+        or not isinstance(words, list)
+        or not words
+        or not isinstance(indices, list)
+        or len(indices) != len(words)
+        or any(type(index) is not int or index < 0 for index in indices)
+        or any(right != left + 1 for left, right in zip(indices, indices[1:]))
+    ):
+        return False
+    previous_end = None
+    for word in words:
+        if (
+            not isinstance(word, dict)
+            or not isinstance(word.get("word"), str)
+            or not word["word"].strip()
+            or not _is_finite_number(word.get("start"))
+            or not _is_finite_number(word.get("end"))
+            or word["start"] > word["end"]
+        ):
+            return False
+        if previous_end is not None and word["start"] < previous_end:
+            return False
+        previous_end = word["end"]
+    if sentence["start"] != words[0]["start"] or sentence["end"] != words[-1]["end"]:
+        return False
+    source_text = "".join(word["word"] for word in words)
+    return bool(_source_content_signature(source_text)) and _source_content_signature(
+        sentence["text"]
+    ) == _source_content_signature(source_text)
+
+
+def _is_source_grouping(record: Any) -> bool:
+    if not (
+        isinstance(record, dict)
+        and set(record) == {"status", "fingerprint", "sentences"}
+        and record["status"] == "accepted"
+        and isinstance(record["fingerprint"], str)
+        and bool(record["fingerprint"])
+        and isinstance(record["sentences"], list)
+        and bool(record["sentences"])
+        and all(_is_source_sentence(sentence) for sentence in record["sentences"])
+    ):
+        return False
+    next_index = 0
+    for sentence in record["sentences"]:
+        indices = sentence["source_word_indices"]
+        if indices[0] != next_index:
+            return False
+        next_index = indices[-1] + 1
+    return True
+
+
 def _is_checkpoint_state(value: Any) -> bool:
     version = value.get("version") if isinstance(value, dict) else None
     if (
@@ -98,11 +170,15 @@ def _is_checkpoint_state(value: Any) -> bool:
         or version != CHECKPOINT_VERSION
     ):
         return False
-    if set(value) - {"version", "transcription", "translation"}:
+    if set(value) - {"version", "transcription", "source_grouping", "translation"}:
         return False
 
     transcription = value.get("transcription")
     if transcription is not None and not _is_complete_transcription(transcription):
+        return False
+
+    source_grouping = value.get("source_grouping")
+    if source_grouping is not None and not _is_source_grouping(source_grouping):
         return False
 
     translation = value.get("translation")
@@ -180,6 +256,35 @@ class CheckpointStore:
             "version": CHECKPOINT_VERSION,
             "transcription": record,
         }
+        self._write_state(state)
+        self._state = state
+
+    def load_source_sentences(self, fingerprint: str) -> Optional[List[Dict]]:
+        """Load a matching, fully validated Source Sentence grouping."""
+        record = self._state.get("source_grouping")
+        if not _is_source_grouping(record) or record["fingerprint"] != fingerprint:
+            return None
+        return copy.deepcopy(record["sentences"])
+
+    def save_source_sentences(self, fingerprint: str, sentences: List[Dict]) -> None:
+        """Persist an accepted Source Sentence grouping atomically."""
+        record = {
+            "status": "accepted",
+            "fingerprint": fingerprint,
+            "sentences": copy.deepcopy(sentences),
+        }
+        if not _is_source_grouping(record):
+            raise ValueError("only complete Source Sentence groupings can be checkpointed")
+        state = copy.deepcopy(self._state)
+        previous = state.get("source_grouping")
+        grouping_changed = (
+            not isinstance(previous, dict)
+            or previous.get("fingerprint") != fingerprint
+            or previous.get("sentences") != record["sentences"]
+        )
+        if grouping_changed:
+            state.pop("translation", None)
+        state["source_grouping"] = record
         self._write_state(state)
         self._state = state
 

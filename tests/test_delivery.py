@@ -5,6 +5,7 @@ import unicodedata
 from unittest.mock import patch
 
 from hermecho.pipeline import PipelineConfig, process_video
+from hermecho.sentence_first import SourceGroupingDiagnostic, SourceTimingDiagnostic
 from hermecho.subtitles import (
     apply_delivery_profile,
     delivery_gate_report,
@@ -38,6 +39,42 @@ class TestVisualCells(unittest.TestCase):
 
 
 class TestDeliveryProfiles(unittest.TestCase):
+    def test_report_includes_rendered_line_and_source_timing_locations(self) -> None:
+        portrait = delivery_profile_for_orientation(is_portrait=True)
+        result = apply_delivery_profile(
+            [{"start": 2.0, "end": 3.0, "text": "甲" * 14}],
+            portrait,
+        )
+
+        report = delivery_gate_report(
+            result,
+            portrait,
+            source_grouping_diagnostics=[
+                SourceGroupingDiagnostic(
+                    "source_boundary_review_failed",
+                    2.0,
+                    3.0,
+                    "retained deterministic grouping",
+                )
+            ],
+            source_timing_diagnostics=[
+                SourceTimingDiagnostic(
+                    "long_source_word",
+                    9.2,
+                    18.4,
+                    "Source Word spans 9.2s",
+                )
+            ],
+        )
+
+        self.assertIn("rendered_lines", report)
+        self.assertIn("Cues: 1", report)
+        self.assertIn("Rendered Lines: 2", report)
+        self.assertIn("time=2s–3s", report)
+        self.assertIn("Source Sentence Diagnostics: 1", report)
+        self.assertIn("Source Timing Diagnostics: 1", report)
+        self.assertIn("[9.2s–18.4s]", report)
+
     def test_split_uses_segment_timing_when_source_word_timing_is_invalid(self) -> None:
         segments = [
             {

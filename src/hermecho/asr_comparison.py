@@ -49,7 +49,6 @@ class ComparisonConfig:
     target_language: str = "Traditional Chinese (Taiwan)"
     start: str = DEFAULT_START
     end: str = DEFAULT_END
-    time_buffer: float = 0.1
     font_name: str = "Heiti TC"
     fonts_dir: Optional[str] = None
     font_size: int = 12
@@ -241,7 +240,6 @@ def _effective_options_match_shared(
             "margin_v",
             "margin_h",
             "alignment",
-            "time_buffer",
         )
     ) and options["box_background"] == _cli_defaults().box_background
 
@@ -258,7 +256,6 @@ def _subtitle_style_is_valid(style: Any) -> bool:
         and _nonnegative_integer(style.get("margin_v"))
         and _nonnegative_integer(style.get("margin_h"))
         and _alignment(style.get("alignment"))
-        and _nonnegative_number(style.get("time_buffer"))
     )
 
 
@@ -470,7 +467,6 @@ def _manifest(config: ComparisonConfig, range_path: Path) -> dict[str, Any]:
                 "margin_v": config.margin_v,
                 "margin_h": config.margin_h,
                 "alignment": config.alignment,
-                "time_buffer": config.time_buffer,
             },
             "effective_cli_options": _common_cli_options(
                 config,
@@ -528,7 +524,6 @@ def _common_cli_options(
         "translation_model": config.translation_model,
         "reference_file": str(config.reference_file),
         "locked_terms_file": str(config.locked_terms_file),
-        "time_buffer": config.time_buffer,
         "font_name": config.font_name,
         "fonts_dir": fonts_dir,
         "font_size": config.font_size,
@@ -676,8 +671,6 @@ def _pipeline_args(
         config.target_language,
         "--translation_model",
         config.translation_model,
-        "--time_buffer",
-        str(config.time_buffer),
         "--reference_file",
         str(config.reference_file),
         "--locked-terms-file",
@@ -946,7 +939,6 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> ComparisonConfig:
     parser.add_argument("--locked-terms-file", type=Path, default=Path("references/locked_terms.json"))
     parser.add_argument("--translation-model", default="deepseek/deepseek-v4.1-flash")
     parser.add_argument("--target-language", default="Traditional Chinese (Taiwan)")
-    parser.add_argument("--time-buffer", type=float, default=0.1)
     parser.add_argument("--font-name", default="Heiti TC")
     parser.add_argument("--fonts-dir")
     parser.add_argument("--font-size", type=int, default=12)

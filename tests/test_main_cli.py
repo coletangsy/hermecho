@@ -24,6 +24,7 @@ class TestCliArguments(unittest.TestCase):
             "--no-timing-review",
             "--timing-review-model",
             "--timing-review-chunk-seconds",
+            "--time_buffer",
         ]
 
         for flag in removed_flags:
@@ -34,6 +35,7 @@ class TestCliArguments(unittest.TestCase):
                 "--initial_prompt",
                 "--timing-review-model",
                 "--timing-review-chunk-seconds",
+                "--time_buffer",
             }:
                 argv.append("value")
             with self.subTest(flag=flag), patch.object(sys, "argv", argv):
@@ -161,6 +163,74 @@ class TestPipelineOrchestration(unittest.TestCase):
         self.assertTrue(
             any("0" in message and "empty_translation" in message for message in messages)
         )
+
+    def test_pipeline_reuses_accepted_source_sentence_grouping(self) -> None:
+        source_segments = [
+            {
+                "start": 0.0,
+                "end": 0.4,
+                "text": "안녕.",
+                "words": [{"word": "안녕.", "start": 0.0, "end": 0.4}],
+            },
+            {
+                "start": 0.45,
+                "end": 0.8,
+                "text": "하세요.",
+                "words": [{"word": "하세요.", "start": 0.45, "end": 0.8}],
+            },
+        ]
+        translated = [
+            {
+                "start": 0.0,
+                "end": 0.8,
+                "text": "你好。",
+                "source_words": [word for segment in source_segments for word in segment["words"]],
+                "source_word_indices": [0, 1],
+            }
+        ]
+        output_dir = tempfile.mkdtemp()
+        config = PipelineConfig(
+            video_filename="clip.mp4",
+            input_dir="input",
+            output_dir=output_dir,
+            srt_only=True,
+            stage_cooldown=0,
+        )
+        audio_paths = []
+
+        def extract_audio(_video_path: str) -> str:
+            path = self._checkpoint_audio(b"same-audio")
+            audio_paths.append(path)
+            return path
+
+        try:
+            with patch("hermecho.pipeline.extract_audio", side_effect=extract_audio), \
+                patch("hermecho.pipeline.transcribe_audio", return_value=source_segments), \
+                patch(
+                    "hermecho.pipeline.review_source_sentence_boundaries",
+                    return_value={
+                        "decisions": [
+                            {"boundary_index": 0, "merge": True, "text": "안녕하세요."}
+                        ]
+                    },
+                ) as review, \
+                patch("hermecho.pipeline.translate_segments", return_value=translated), \
+                patch(
+                    "hermecho.pipeline.build_delivery_cues",
+                    return_value=self._checkpoint_delivery(translated),
+                ), \
+                patch("hermecho.pipeline.load_reference_material", return_value=""), \
+                patch("hermecho.pipeline.load_locked_terms", return_value={}), \
+                patch("hermecho.pipeline.is_portrait_video", return_value=False), \
+                patch("hermecho.pipeline.generate_srt"):
+                cli.process_video(config)
+                cli.process_video(config)
+        finally:
+            for path in audio_paths:
+                if os.path.exists(path):
+                    os.unlink(path)
+
+        review.assert_called_once()
 
     def test_pipeline_excludes_no_speech_from_source_and_translation_delivery(self) -> None:
         with tempfile.NamedTemporaryFile(suffix=".mp3", delete=False) as tmp:
@@ -470,7 +540,6 @@ class TestPipelineOrchestration(unittest.TestCase):
             language="ko",
             target_language="Traditional Chinese (Taiwan)",
             translation_model="openrouter-test",
-            time_buffer=0.25,
             input_dir="input",
             output_dir=tempfile.mkdtemp(),
             reference_file="references/tripleS.md",
@@ -513,7 +582,7 @@ class TestPipelineOrchestration(unittest.TestCase):
             backend="whisper",
         )
         self.assertEqual(deliver.call_args.args[0], translated)
-        self.assertEqual(deliver.call_args.kwargs["time_buffer"], 0.25)
+        self.assertNotIn("time_buffer", deliver.call_args.kwargs)
         generate_srt.assert_called_once_with(adjusted, generate_srt.call_args.args[1])
         self.assertEqual(generate_srt.call_args.args[0][0]["text"], "你好，世界。")
 

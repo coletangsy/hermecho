@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import json
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 
 def build_translation_prompt(
@@ -98,6 +98,43 @@ def build_translation_prompt(
     return prompt_text
 
 
+def build_source_boundary_review_prompt(candidates: List[Dict]) -> str:
+    """Build one strict review request for selected ambiguous Source boundaries."""
+    review_items = [
+        {
+            "boundary_index": candidate["boundary_index"],
+            "start": candidate["start"],
+            "end": candidate["end"],
+            "gap": candidate["gap"],
+            "reason": candidate["reason"],
+            "left": candidate["left"],
+            "right": candidate["right"],
+        }
+        for candidate in candidates
+    ]
+    output_shape = {
+        "decisions": [
+            {
+                "boundary_index": candidate["boundary_index"],
+                "merge": True,
+                "text": "<optional assembled Source Sentence text>",
+            }
+            for candidate in candidates
+        ]
+    }
+    return (
+        "Review only the listed ambiguous boundaries between deterministic Source "
+        "Sentences. Decide whether each adjacent pair belongs to one complete "
+        "meaning. Return one decision for every boundary index. A merge may join "
+        "only the adjacent Source Word spans; it must not omit, duplicate, reorder, "
+        "or rewrite any recognized Source Word or timestamp. The optional text may "
+        "normalize spaces and sentence punctuation only. Clear boundaries should "
+        "be kept. Return one valid JSON object and no explanation.\n"
+        f"Candidates:\n{json.dumps(review_items, ensure_ascii=False)}\n"
+        f"Required shape:\n{json.dumps(output_shape, ensure_ascii=False)}"
+    )
+
+
 def build_fit_repair_prompt(
     source_text: str,
     translation_sentence: str,
@@ -126,13 +163,35 @@ def build_alignment_prompt(
     translation_sentence: str,
     source_words: List[Dict],
     target_language: str,
+    profile: Optional[Any] = None,
+    feedback: Optional[List[str]] = None,
 ) -> str:
     """Build a targeted prompt for mapping unchanged target text to Source Words."""
+    delivery_profile = {
+        "name": getattr(profile, "name", "unknown"),
+        "target_rendered_lines": getattr(profile, "target_rendered_lines", 1),
+        "max_rendered_lines": getattr(profile, "max_rendered_lines", 2),
+        "warning_line_cells": getattr(profile, "warning_line_cells", None),
+        "repair_line_cells": getattr(profile, "repair_line_cells", None),
+        "warning_cue_cells": getattr(profile, "warning_cue_cells", None),
+        "repair_cue_cells": getattr(profile, "repair_cue_cells", None),
+        "warning_cps": getattr(profile, "warning_cps", None),
+        "repair_cps": getattr(profile, "repair_cps", None),
+        "warning_min_duration": getattr(profile, "warning_min_duration", None),
+        "warning_max_duration": getattr(profile, "warning_max_duration", None),
+    }
+    feedback_text = json.dumps(feedback or [], ensure_ascii=False)
     return (
         f"Map this accepted {target_language} Translation Sentence to the ordered Source Words. "
         "Do not rewrite, omit, duplicate, or add any target text. Return only JSON.\n"
         f"Source Sentence: {source_text}\n"
         f"Translation Sentence: {translation_sentence}\n"
         f"Source Words: {json.dumps(source_words, ensure_ascii=False)}\n"
+        f"Delivery Profile: {json.dumps(delivery_profile, ensure_ascii=False)}\n"
+        f"Specific problems from the previous candidate: {feedback_text}\n"
+        "Prefer the fewest natural consecutive pieces that meet the profile. "
+        "Each piece must be a non-empty exact substring of the Translation Sentence; "
+        "pieces must concatenate exactly and cover one continuous Source Word range. "
+        "Use Source Word start/end timestamps as the only timing evidence.\n"
         '{"pieces": [{"text": "exact target piece", "end_source_word_index": 0}]}'
     )
