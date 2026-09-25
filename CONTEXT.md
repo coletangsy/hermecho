@@ -70,6 +70,10 @@ _Avoid_: Partial translation, silent failure
 
 ## Review
 
+**ASR Evaluation**:
+A review of timed transcripts from multiple transcription models on the same source media, with a local baseline and recorded cost, latency, and human review evidence. It does not promote a model into the delivery pipeline.
+_Avoid_: Accuracy leaderboard, approved backend
+
 **Comparison Run**:
 Paired Baseline and Candidate executions of the same source and configuration with exactly one declared changed variable.
 _Avoid_: Uncontrolled benchmark, casual comparison

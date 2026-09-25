@@ -4,7 +4,7 @@ Hermecho translates videos with Korean audio into Traditional Chinese (Taiwan) s
 
 ## Features
 
-- Local Whisper transcription with no transcription API usage.
+- Local Whisper transcription in the normal pipeline with no transcription API usage.
 - OpenRouter translation with reference-file context for names and terms.
 - Translation Gate rejects incomplete model responses and enforces JSON Locked Terms.
 - Source Sentence grouping and Delivery Profile guardrails for subtitle timing and layout.
@@ -62,6 +62,34 @@ python -m hermecho.asr_comparison input/20251231_w-yGSP1c3bg.mp4 --language ko
 It writes manifests, timings, a source-transcript diff, a shared-audio Review
 Composite, and `output/asr-comparison/review.md`. A reviewer must complete its
 checklist and mark the decision `approved` before `auto` can select MLX.
+
+For a separate OpenRouter ASR Evaluation, run:
+
+```bash
+python -m hermecho.openrouter_asr_evaluation input/Wsp9Z6-S0LA.mp4 \
+  --output-dir output/openrouter-asr-evaluation-20260925 --max-cost-usd 10
+```
+
+This tool compares local Whisper `large` with `google/gemini-3.5-transcribe`
+and `microsoft/mai-transcribe-2`. It fixes Korean (`ko`) and uses no vocabulary
+prompt. Each OpenRouter model first receives a 30-second probe; a missing or
+invalid word-timestamp response disqualifies it from the full-video run. Eligible
+models receive the same 60-second audio ranges with one second of overlap.
+The tool retains only words whose midpoints fall in each range's core interval.
+Elapsed time sums the full-video API requests for remote models and local
+transcription for Whisper; audio extraction and the remote probes are separate.
+
+The output directory must be empty. It contains `manifest.json`,
+`comparison.json`, per-model responses, `review.md`, and five audio clips for
+human listening. The report lists zero-duration and over-three-second word
+timestamps for review. `progress.json` records completed calls if a run stops early.
+The budget check stops new requests when reported cumulative OpenRouter cost
+reaches `--max-cost-usd`; a single request can take the total past that value,
+and an interrupted or malformed response may have unreported cost. There is no
+automatic retry. The prior source SRT and local Whisper output are comparison
+material, not a manually verified answer key, so the tool does not report a
+word error rate or approve a model. This evaluation does not change the normal
+Hermecho transcription backend or MLX approval evidence.
 
 `requirements.txt` is kept for compatibility and installs the editable package:
 
@@ -121,9 +149,9 @@ hermecho clip.mp4 --input_dir ./videos --output_dir ./exports
 
 For agent-operated jobs, use [run-hermecho-job](.agents/skills/run-hermecho-job/SKILL.md).
 Monitoring an existing session does not launch another process. Transcribe-only
-runs do not need translation credentials or Locked Terms; translated and comparison
-runs validate both before starting. Verify the expected artifacts and gate reports
-even when the CLI exits with status zero.
+runs do not need translation credentials or Locked Terms; translated and MLX
+comparison runs validate both before starting. Verify the expected artifacts
+and gate reports even when the CLI exits with status zero.
 
 The full pipeline is:
 
