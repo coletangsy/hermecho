@@ -247,6 +247,7 @@ def _process_video(config: PipelineConfig) -> None:
 
         transcript_segments = []
         source_sentences = []
+        source_timing_diagnostics = []
         locked_terms = {}
         reference_material = None
         if config.transcribe_only:
@@ -412,11 +413,12 @@ def _process_video(config: PipelineConfig) -> None:
             bundle_path = os.path.join(output_dir, f"{video_name}_{timestamp}_subtitle_bundle.json")
             bundle = write_bundle(bundle_path, source_sentences, delivery_cues,
                 video_fingerprint=fingerprint_file(video_path), source_language=config.language,
-                target_language=config.target_language, profile=profile, duration=duration)
+                target_language=config.target_language, profile=profile, duration=duration,
+                source_timing_diagnostics=source_timing_diagnostics)
             report_path = os.path.join(output_dir, f"{video_name}_{timestamp}_delivery_gate.txt")
             with open(report_path, "w", encoding="utf-8") as report_file:
                 report_file.write("Subtitle timing preserved; quality findings are warnings.\n")
-                report_file.write(json.dumps({"diagnostics": bundle["diagnostics"], "omitted": bundle["omitted"]}, ensure_ascii=False, indent=2))
+                report_file.write(json.dumps({"diagnostics": bundle["diagnostics"], "source_timing_diagnostics": bundle["source_timing_diagnostics"], "omitted": bundle["omitted"]}, ensure_ascii=False, indent=2))
             emit_progress("delivery_gate", "complete", "Source subtitle timing preserved", detail=report_path)
 
             next_stage("Writing Subtitle SRT")

@@ -104,6 +104,31 @@ def test_pipeline_preserves_all_source_pairs_without_nontranslation_requests(tmp
         request.assert_not_called()
 
 
+def test_pipeline_preserves_source_timing_diagnostics_in_bundle_and_report(tmp_path):
+    video = tmp_path / "clip.mp4"
+    video.write_bytes(b"source")
+    audio = tmp_path / "clip.mp3"
+    audio.write_bytes(b"audio")
+    original = [{"start": 1.0, "end": 9.2, "text": "long.",
+                 "words": [{"word": "long.", "start": 1.0, "end": 9.2}]}]
+    with patch("hermecho.pipeline.extract_audio", return_value=str(audio)), patch(
+        "hermecho.pipeline.transcribe_audio", return_value=original,
+    ), patch("hermecho.pipeline.translate_segments", side_effect=lambda cues, **kw: [{**c, "text": "翻譯"} for c in cues]), patch(
+        "hermecho.pipeline.is_portrait_video", return_value=False,
+    ), patch("hermecho.pipeline.load_reference_material", return_value=""), patch(
+        "hermecho.pipeline.load_locked_terms", return_value={},
+    ):
+        process_video(PipelineConfig("clip.mp4", input_dir=str(tmp_path), output_dir=str(tmp_path / "out"),
+                                     srt_only=True, language="ko", stage_cooldown=0))
+    bundle = json.loads(next((tmp_path / "out").rglob("*_subtitle_bundle.json")).read_text())
+    diagnostic = bundle["source_timing_diagnostics"][0]
+    assert (diagnostic["code"], diagnostic["start"], diagnostic["end"], diagnostic["severity"]) == ("long_source_word", 1.0, 9.2, "Warning")
+    assert (bundle["source_cues"][0]["start_ms"], bundle["translation_cues"][0]["end_ms"]) == (1000, 9200)
+    assert bundle["source_cues"][0]["source_words"][0] == original[0]["words"][0]
+    report = next((tmp_path / "out").rglob("*_delivery_gate.txt")).read_text()
+    assert '"source_timing_diagnostics"' in report and "long_source_word" in report
+
+
 def test_imported_source_translation_skips_asr_and_keeps_invalid_times(tmp_path):
     video = tmp_path / "clip.mp4"
     video.write_bytes(b"video")

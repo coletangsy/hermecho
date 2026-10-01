@@ -8,7 +8,7 @@ import math
 import os
 import tempfile
 import unicodedata
-from typing import Any, Dict, List, Optional, Sequence
+from typing import Any, Dict, List, Optional, Sequence, TypeGuard
 
 
 CHECKPOINT_VERSION = 1
@@ -54,7 +54,7 @@ def _is_complete_transcription(record: Any) -> bool:
     )
 
 
-def _is_finite_number(value: Any) -> bool:
+def _is_finite_number(value: Any) -> TypeGuard[int | float]:
     if not isinstance(value, (int, float)) or isinstance(value, bool):
         return False
     try:

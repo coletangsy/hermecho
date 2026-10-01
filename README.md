@@ -189,12 +189,24 @@ Remote audio is converted to mono 16 kHz MP3 and sent in 60-second core ranges
 with one second of context on each side. Adjacent overlapping word sequences
 must agree in content and order, with timestamp drift of at most 0.25 seconds.
 The earlier chunk's original words and timestamps are retained once, so drift
-across a core boundary cannot duplicate or drop a matched word. Conflicting
-overlap evidence blocks transcription without local fallback. Timestamps are
-offset back to the full audio. Completed chunks and
+across a core boundary cannot duplicate or drop a matched word. If overlap
+evidence conflicts, the production pipeline requests a 20-second audio window
+around that boundary using the same remote model. Three consecutive words with
+matching text and timestamps on each side must anchor this new evidence outside
+the disputed overlap. Only the span between those anchors is replaced, keeping
+its original returned word timestamps. Missing anchors, invalid timing, or a
+failed repair request block transcription without local fallback. Repairs incur
+an additional transcription request per conflicting boundary and are cached
+alongside the original chunks; retries reuse both. ASR Evaluation retains its
+strict comparison policy and does not request repairs. Chunk and repair progress
+is emitted through `HERMECHO_PROGRESS`. Timestamps are offset back to the full
+audio. Completed chunks, boundary evidence, and
 reported cost, provider, model, generation ID, and request latency are retained
 in `output/<video>/.openrouter-transcription.json`; unavailable metadata stays
-unknown. Repeating the same command resumes matching chunks. Audio, model,
+unknown. The checkpoint records raw acquisition and assembly fingerprints
+separately: assembly-only changes reuse matching raw chunks while rebuilding
+the joined transcript under the current policy. Repeating the same command
+resumes matching chunks. Audio, model,
 language, or temperature changes invalidate them; `--force` recomputes them.
 
 Network failures, timeouts, HTTP 408/429, and server errors trigger local Whisper
@@ -248,7 +260,7 @@ Run `hermecho --help` for the full list.
 | `--stage-cooldown` | Delay between stages, default `60`; use `0` to disable. |
 | `--force` | Recompute all stages instead of reusing completed checkpoints. |
 
-Outputs are written under `output/<video_basename>/` with a `YYYYMMDD_HHMMSS` timestamp. Each video also keeps one versioned, atomic `.hermecho-checkpoint.json`: matching completed transcription, accepted Source Sentence grouping, and Translation-Gate-approved chunks resume automatically; changing the grouping fingerprint invalidates downstream translation chunks; `--force` bypasses it. MLX transcription skips segments with non-finite or reversed segment or word timestamps before checkpointing and reports the exclusions as a warning. Translated runs also write a matching `*_subtitle_bundle.json` and `*_delivery_gate.txt` report. Bundles separate complete saved cues from render omissions and record source fingerprints and policy versions.
+Outputs are written under `output/<video_basename>/` with a `YYYYMMDD_HHMMSS` timestamp. Each video also keeps one versioned, atomic `.hermecho-checkpoint.json`: matching completed transcription, accepted Source Sentence grouping, and Translation-Gate-approved chunks resume automatically; changing the grouping fingerprint invalidates downstream translation chunks; `--force` bypasses it. MLX transcription skips segments with non-finite or reversed segment or word timestamps before checkpointing and reports the exclusions as a warning. Translated runs also write a matching `*_subtitle_bundle.json` and `*_delivery_gate.txt` report. Bundles separate complete saved cues from render omissions and record source fingerprints and policy versions. The `source_timing_diagnostics` field preserves suspicious Source Word timing as warnings without rewriting words or timestamps; the delivery report includes those warnings.
 
 ## Hermecho Cloud rollout
 

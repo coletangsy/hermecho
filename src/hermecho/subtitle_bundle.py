@@ -8,6 +8,7 @@ from dataclasses import asdict
 from typing import Any
 
 from .subtitles import DeliveryProfile, apply_delivery_profile
+from .sentence_first import SourceTimingDiagnostic
 from .translation import translation_request_counts
 
 GROUPING_POLICY = "source-sentence-rules-v3"
@@ -135,6 +136,7 @@ def write_bundle(
     target_language: str,
     profile: DeliveryProfile,
     duration: float | None,
+    source_timing_diagnostics: list[SourceTimingDiagnostic] | None = None,
 ) -> dict[str, Any]:
     # The old profile is used for diagnostics only. It must never change saved cues.
     diagnostics = [dict(asdict(d), severity="Warning") for d in apply_delivery_profile(translated, profile).diagnostics]
@@ -146,6 +148,9 @@ def write_bundle(
         source_cues.append({"cue_id": sid, "order": index, "text": original["text"], **timing, "source_word_indices": original.get("source_word_indices", []), "source_words": original.get("source_words", [])})
         translation_cues.append({"cue_id": f"translation-{index}", "order": index, "text": cue["text"], **timing, "source_cue_ids": [sid]})
     bundle = {"bundle_version": 1, "grouping_policy_version": GROUPING_POLICY, "timing_policy_version": TIMING_POLICY, "source_fingerprint": video_fingerprint, "source_language": source_language, "target_language": target_language, "source_cues": source_cues, "translation_cues": translation_cues, "diagnostics": diagnostics, "omitted": omitted, "llm_request_counts": {"boundary_review": 0, "alignment": 0, "fit_repair": 0}}
+    bundle["source_timing_diagnostics"] = [
+        dict(asdict(diagnostic), severity="Warning") for diagnostic in source_timing_diagnostics or []
+    ]
     bundle["translation_sdk_requests"] = translation_request_counts()
     bundle["request_count_scope"] = "application SDK calls; SDK transport retries excluded"
     with open(path, "w", encoding="utf-8") as handle:
