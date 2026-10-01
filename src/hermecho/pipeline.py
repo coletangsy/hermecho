@@ -7,6 +7,7 @@ import os
 import time
 from dataclasses import dataclass
 from datetime import datetime
+from uuid import uuid4
 from typing import Optional
 
 from tqdm import trange
@@ -299,7 +300,7 @@ def _process_video(config: PipelineConfig) -> None:
             _print_segments("Source Sentences", source_sentences)
 
         os.makedirs(output_dir, exist_ok=True)
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S") + "_" + uuid4().hex[:12]
 
         if config.transcribe_only:
             next_stage("Writing Transcript SRT")
@@ -496,7 +497,8 @@ def _process_source_srt(config: PipelineConfig) -> None:
         raise ValueError("Translation Gate blocked final SRT/video delivery")
     translated = preserve_source_translation(source, translated)
     video_path = os.path.abspath(os.path.join(config.input_dir, config.video_filename))
-    base = os.path.join(output_dir, f"{os.path.splitext(config.video_filename)[0]}_{datetime.now().strftime('%Y%m%d_%H%M%S')}")
+    output_id = datetime.now().strftime("%Y%m%d_%H%M%S") + "_" + uuid4().hex[:12]
+    base = os.path.join(output_dir, f"{os.path.splitext(config.video_filename)[0]}_{output_id}")
     generate_srt(source, base + "_transcript_source.srt")
     generate_srt(translated, base + "_subtitles.srt")
     duration = _video_duration_seconds(video_path)

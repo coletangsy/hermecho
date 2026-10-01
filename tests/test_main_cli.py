@@ -773,6 +773,40 @@ class TestPipelineOrchestration(unittest.TestCase):
         self.assertEqual(transcribe.call_count, 2)
         self.assertEqual(translate.call_count, 2)
 
+    def test_policy_change_regroups_without_asr_and_render_changes_reuse_translation(self) -> None:
+        source_segments = [{"start": 0.0, "end": 1.0, "text": "line.",
+                            "words": [{"word": "line.", "start": 0.0, "end": 1.0}]}]
+        output_dir = tempfile.mkdtemp()
+        audio_paths = [self._checkpoint_audio(b"same audio") for _ in range(3)]
+        config = PipelineConfig(
+            video_filename="clip.mp4", input_dir="input", output_dir=output_dir,
+            transcription_backend="whisper", srt_only=True, stage_cooldown=0,
+        )
+        render_config = PipelineConfig(**{**config.__dict__, "font_size": 32})
+        try:
+            with patch("hermecho.pipeline.extract_audio", side_effect=audio_paths), \
+                patch("hermecho.pipeline.transcribe_audio", return_value=source_segments) as transcribe, \
+                patch("hermecho.pipeline.is_portrait_video", return_value=False), \
+                patch("hermecho.pipeline.load_reference_material", return_value=""), \
+                patch("hermecho.pipeline.load_locked_terms", return_value={}), \
+                patch("hermecho.pipeline.generate_srt") as write_srt, \
+                patch("hermecho.translation._translate_chunk", side_effect=self._checkpoint_response) as translate:
+                cli.process_video(config)
+                cli.process_video(render_config)
+                # Mimic migration from a retired grouping policy. Matching ASR
+                # evidence is reusable, while the old grouping is not.
+                with patch("hermecho.pipeline.GROUPING_POLICY", "source-sentence-rules-next"):
+                    cli.process_video(render_config)
+        finally:
+            for audio_path in audio_paths:
+                if os.path.exists(audio_path):
+                    os.unlink(audio_path)
+        self.assertEqual(transcribe.call_count, 1)
+        # A changed policy invalidates grouping and downstream translation.
+        self.assertEqual(translate.call_count, 2)
+        paths = [call.args[1] for call in write_srt.call_args_list]
+        self.assertEqual(len(paths), len(set(paths)))
+
     def test_pipeline_force_recomputes_transcription_and_translation(self) -> None:
         source_segments = [{"start": 0.0, "end": 1.0, "text": "line"}]
         output_dir = tempfile.mkdtemp()
