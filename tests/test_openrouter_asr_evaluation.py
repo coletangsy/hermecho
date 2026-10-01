@@ -132,9 +132,18 @@ class TestOpenRouterAsrEvaluation(unittest.TestCase):
             def extract(_source, destination, *_args):
                 destination.write_bytes(b"audio")
 
+            candidates = []
+            for core_start in range(0, 462, 60):
+                start = max(0, core_start - 1)
+                end = min(462, core_start + 61)
+                candidates.append({
+                    "words": [{"word": f"candidate-{second}", "start": second - start,
+                               "end": second + 0.1 - start}
+                              for second in range(0, 462, 60) if start <= second < end],
+                    "cost_usd": 0.01, "elapsed_seconds": 0.1,
+                })
             calls = [response("probe", 0, 1), response("probe", 0, 1),
-                     response("first", 0, 1), RuntimeError("failed chunk"),
-                     *[response("candidate", 1, 2) for _ in range(8)]]
+                     response("first", 0, 1), RuntimeError("failed chunk"), *candidates]
             with patch.dict("os.environ", {"OPENROUTER_API_KEY": "test"}), \
                     patch("hermecho.openrouter_asr_evaluation._ffprobe_duration", return_value=462), \
                     patch("hermecho.openrouter_asr_evaluation._extract_audio", side_effect=extract), \
@@ -152,6 +161,53 @@ class TestOpenRouterAsrEvaluation(unittest.TestCase):
             self.assertEqual(complete["status"], "complete")
             self.assertEqual(complete["words"][1]["start"], 60)
             self.assertEqual(len(list(output.glob("review_*.mp3"))), 5)
+
+    def test_evaluation_reconciles_drift_and_reports_conflicting_overlap(self) -> None:
+        for conflict in (False, True):
+            with self.subTest(conflict=conflict), tempfile.TemporaryDirectory() as root:
+                video = Path(root) / "video.mp4"
+                video.write_bytes(b"video")
+                output = Path(root) / "evaluation"
+
+                def extract(_source, destination, *_args):
+                    destination.write_bytes(b"audio")
+
+                def request(path, model, _api_key, duration):
+                    if path.stem == "probe":
+                        words = [{"word": "probe", "start": 0, "end": 1}]
+                    else:
+                        core_start = (int(path.stem.split("_")[1]) - 1) * 60
+                        start = max(0, core_start - 1)
+                        words = []
+                        for second in range(0, 462, 60):
+                            absolute_start = second - 0.2 if second == core_start + 60 else second
+                            if start <= absolute_start and absolute_start + 0.1 <= start + duration:
+                                word = f"word-{second}"
+                                if conflict and model == "microsoft/mai-transcribe-2" and core_start == 60 and second == 60:
+                                    word = "conflicting-word"
+                                words.append({"word": word, "start": absolute_start - start,
+                                              "end": absolute_start + 0.1 - start})
+                    return {"words": words, "cost_usd": 0.01, "elapsed_seconds": 0.1}
+
+                with patch.dict("os.environ", {"OPENROUTER_API_KEY": "test"}), \
+                        patch("hermecho.openrouter_asr_evaluation._ffprobe_duration", return_value=462), \
+                        patch("hermecho.openrouter_asr_evaluation._extract_audio", side_effect=extract), \
+                        patch("hermecho.openrouter_asr_evaluation._request_transcription", side_effect=request), \
+                        patch("hermecho.openrouter_asr_evaluation.transcribe_audio", return_value=[{
+                            "text": "baseline", "start": 0, "end": 1,
+                            "words": [{"word": "baseline", "start": 0, "end": 1}],
+                        }]):
+                    report = run_evaluation(video, output, 10.0)
+                google = report["models"]["google/gemini-3.5-transcribe"]
+                self.assertEqual(google["status"], "complete")
+                self.assertEqual([word["word"] for word in google["words"]],
+                                 [f"word-{second}" for second in range(0, 462, 60)])
+                mai = report["models"]["microsoft/mai-transcribe-2"]
+                self.assertEqual(mai["status"], "chunk_failed" if conflict else "complete")
+                if conflict:
+                    self.assertIn("overlapping transcripts disagree", mai["error"])
+                    self.assertEqual(len(mai["chunks"]), 2)
+                    self.assertTrue((output / "microsoft_mai-transcribe-2_chunk_02.json").exists())
 
     def test_rejects_missing_cost_so_budget_cannot_be_guessed(self) -> None:
         body = {"words": [{"word": "안녕", "start": 0, "end": 0.8}]}

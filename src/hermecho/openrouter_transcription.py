@@ -10,6 +10,7 @@ from __future__ import annotations
 import base64
 import http.client
 import json
+import math
 import os
 import subprocess
 import tempfile
@@ -28,8 +29,10 @@ from .checkpoints import (
 
 TRANSCRIPTION_URL = "https://openrouter.ai/api/v1/audio/transcriptions"
 DEFAULT_OPENROUTER_TRANSCRIPTION_MODEL = "microsoft/mai-transcribe-2"
+TRANSCRIPTION_ASSEMBLY_RULES = "openrouter-word-chunks-v2"
 CHUNK_SECONDS = 60.0
 OVERLAP_SECONDS = 1.0
+OVERLAP_TIMESTAMP_TOLERANCE = 0.25
 CHECKPOINT_VERSION = 1
 REQUEST_TIMEOUT_SECONDS = 120
 
@@ -385,22 +388,52 @@ def _words_for_output(
     chunks: list[tuple[dict[str, float], dict[str, Any]]],
     duration: float,
 ) -> list[dict[str, Any]]:
-    """Apply half-open midpoint ownership to every overlapping chunk."""
+    """Reconcile shared word evidence before joining adjacent audio chunks."""
     kept: list[dict[str, Any]] = []
+    previous_spec: Optional[dict[str, float]] = None
     for spec, record in chunks:
         offset = spec["start"]
-        for word in record["words"]:
-            absolute_word = {
+        absolute_words = [
+            {
                 "word": word["word"],
                 "start": float(word["start"]) + offset,
                 "end": float(word["end"]) + offset,
             }
-            midpoint = (absolute_word["start"] + absolute_word["end"]) / 2
-            if spec["core_start"] <= midpoint < spec["core_end"] or (
-                spec["core_end"] == duration and midpoint == duration
-            ):
-                kept.append(absolute_word)
+            for word in record["words"]
+        ]
+        if previous_spec is not None:
+            overlap_start = spec["start"]
+            overlap_end = previous_spec["end"]
 
+            def in_overlap(word: dict[str, Any]) -> bool:
+                return (
+                    word["end"] >= overlap_start
+                    or math.isclose(word["end"], overlap_start, abs_tol=1e-9, rel_tol=0)
+                ) and (
+                    word["start"] <= overlap_end
+                    or math.isclose(word["start"], overlap_end, abs_tol=1e-9, rel_tol=0)
+                )
+
+            left = [word for word in kept if in_overlap(word)]
+            right = [word for word in absolute_words if in_overlap(word)]
+            if len(left) != len(right) or any(
+                _content_signature(first["word"]).casefold()
+                != _content_signature(second["word"]).casefold()
+                or abs(first["start"] - second["start"]) > OVERLAP_TIMESTAMP_TOLERANCE
+                or abs(first["end"] - second["end"]) > OVERLAP_TIMESTAMP_TOLERANCE
+                for first, second in zip(left, right)
+            ):
+                raise RuntimeError(
+                    f"OpenRouter overlapping transcripts disagree near {spec['core_start']:g}s; "
+                    "cannot reconcile complete Source Word evidence."
+                )
+            # Keep the earlier chunk's exact evidence once, regardless of which
+            # side of the core boundary either response assigned to that word.
+            absolute_words = [word for word in absolute_words if not in_overlap(word)]
+        kept.extend(absolute_words)
+        previous_spec = spec
+
+    _validate_absolute_words(kept, duration)
     return kept
 
 
@@ -524,7 +557,6 @@ def transcribe_openrouter(
             completed.append((spec, record))
 
     words = _words_for_output(completed, float(duration))
-    _validate_absolute_words(words, float(duration))
     segments = _segments_from_words(words)
     state["status"] = "complete"
     state["metadata"] = _aggregate_metadata(completed)

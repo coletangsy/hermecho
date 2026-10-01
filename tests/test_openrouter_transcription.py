@@ -10,8 +10,10 @@ from hermecho.openrouter_transcription import (
     DEFAULT_OPENROUTER_TRANSCRIPTION_MODEL,
     OpenRouterRequestError,
     _aggregate_metadata,
+    _chunk_specs,
     _request_transcription,
     _response_words,
+    _words_for_output,
     transcribe_openrouter,
 )
 
@@ -38,6 +40,59 @@ def _words(*values):
 
 
 class TestOpenRouterTranscription(unittest.TestCase):
+    def test_overlap_timestamp_drift_neither_duplicates_nor_drops_a_word(self) -> None:
+        specs = _chunk_specs(120.0)
+        for first_start, second_start in ((59.8, 60.0), (60.0, 59.8)):
+            with self.subTest(first_start=first_start, second_start=second_start):
+                chunks = [
+                    (specs[0], {"words": _words(("hello", first_start, first_start + 0.1))}),
+                    (specs[1], {"words": _words(("hello", second_start - 59, second_start - 58.9))}),
+                ]
+                words = _words_for_output(chunks, 120.0)
+                self.assertEqual([word["word"] for word in words], ["hello"])
+                self.assertIn(words[0], chunks[0][1]["words"])
+
+    def test_overlap_preserves_repeated_words_and_original_evidence(self) -> None:
+        specs = _chunk_specs(120.0)
+        left = _words((" Ha!", 59.7, 59.8), ("ha", 60.1, 60.2))
+        right = _words(("ha", 0.75, 0.85), ("HA.", 1.15, 1.25))
+        words = _words_for_output([(specs[0], {"words": left}),
+                                   (specs[1], {"words": right})], 120.0)
+        self.assertEqual(words, left)
+
+    def test_conflicting_overlap_evidence_blocks_instead_of_guessing(self) -> None:
+        specs = _chunk_specs(120.0)
+        left = _words(("one", 59.5, 59.6), ("two", 60.1, 60.2))
+        conflicts = [
+            _words(("one", 0.5, 0.6)),  # missing the second shared word
+            _words(("other", 0.5, 0.6), ("two", 1.1, 1.2)),
+            _words(("two", 0.5, 0.6), ("one", 1.1, 1.2)),
+            _words(("one", 1.0, 1.1), ("two", 1.5, 1.6)),
+        ]
+        for right in conflicts:
+            with self.subTest(right=right), self.assertRaisesRegex(RuntimeError, "overlapping transcripts disagree"):
+                _words_for_output([(specs[0], {"words": left}),
+                                   (specs[1], {"words": right})], 120.0)
+
+    def test_overlap_includes_zero_duration_words_and_float_edges(self) -> None:
+        specs = _chunk_specs(120.0)
+        left = _words(("edge", 58.95, 59 - 1e-12), ("zero", 61, 61))
+        right = _words(("edge", 0, 0.02), ("zero", 2, 2))
+        self.assertEqual(_words_for_output([
+            (specs[0], {"words": left}), (specs[1], {"words": right}),
+        ], 120.0), left)
+
+    def test_overlap_reconciles_multiple_boundaries_without_reordering(self) -> None:
+        specs = _chunk_specs(180.0)
+        chunks = [
+            (specs[0], {"words": _words(("first", 59.8, 59.9))}),
+            (specs[1], {"words": _words(("first", 1.0, 1.1), ("second", 61.0, 61.1))}),
+            (specs[2], {"words": _words(("second", 0.8, 0.9), ("last", 3.0, 3.1))}),
+        ]
+        words = _words_for_output(chunks, 180.0)
+        self.assertEqual([word["word"] for word in words], ["first", "second", "last"])
+        self.assertEqual([word["start"] for word in words], [59.8, 120.0, 122.0])
+
     def test_missing_chunk_metadata_does_not_become_zero_cost_or_latency(self) -> None:
         for records in ([], [({}, {})], [({}, {"metadata": {
             "cost_usd": 0.1, "elapsed_seconds": 1.0,
@@ -187,7 +242,7 @@ class TestOpenRouterTranscription(unittest.TestCase):
 
     def test_resumes_chunks_and_invalidates_when_configuration_changes(self) -> None:
         responses = [
-            ({"text": "a", "words": _words(("a", 1, 2))}, {"cost": 0.1}),
+            ({"text": "a b", "words": _words(("a", 1, 2), ("b", 60, 61))}, {"cost": 0.1}),
             OpenRouterRequestError("interrupted second chunk"),
             ({"text": "b", "words": _words(("b", 1, 2))}, {"cost": 0.2}),
         ]
@@ -240,7 +295,7 @@ class TestOpenRouterTranscription(unittest.TestCase):
 
                 responses.extend(
                     [
-                        ({"text": "c", "words": _words(("c", 1, 2))}, {"cost": 0.3}),
+                        ({"text": "c d", "words": _words(("c", 1, 2), ("d", 60, 61))}, {"cost": 0.3}),
                         ({"text": "d", "words": _words(("d", 1, 2))}, {"cost": 0.4}),
                     ]
                 )
@@ -250,7 +305,7 @@ class TestOpenRouterTranscription(unittest.TestCase):
                 self.assertEqual(request.call_count, 5)
                 self.assertEqual([word["word"] for word in changed[0]["words"]], ["c", "d"])
 
-    def test_midpoint_ownership_deduplicates_overlap_and_offsets_words(self) -> None:
+    def test_reconciliation_deduplicates_overlap_and_offsets_words(self) -> None:
         calls = 0
 
         def fake_request(_path, _model, _language, _temperature, _api_key):

@@ -76,7 +76,9 @@ and `microsoft/mai-transcribe-2`. It fixes Korean (`ko`) and uses no vocabulary
 prompt. Each OpenRouter model first receives a 30-second probe; a missing or
 invalid word-timestamp response disqualifies it from the full-video run. Eligible
 models receive the same 60-second audio ranges with one second of overlap.
-The tool retains only words whose midpoints fall in each range's core interval.
+The tool reconciles adjacent overlap word sequences and timing before joining
+the transcripts, preserving one original copy of each shared word. Conflicting
+overlap evidence blocks that candidate and remains available for review.
 Elapsed time sums the full-video API requests for remote models and local
 transcription for Whisper; audio extraction and the remote probes are separate.
 
@@ -183,8 +185,12 @@ the [OpenRouter speech-to-text API](https://openrouter.ai/docs/guides/overview/m
 Other model slugs must return complete word timestamps to work in this pipeline.
 
 Remote audio is converted to mono 16 kHz MP3 and sent in 60-second core ranges
-with one second of context on each side. Word midpoints select the owning core
-range and timestamps are offset back to the full audio. Completed chunks and
+with one second of context on each side. Adjacent overlapping word sequences
+must agree in content and order, with timestamp drift of at most 0.25 seconds.
+The earlier chunk's original words and timestamps are retained once, so drift
+across a core boundary cannot duplicate or drop a matched word. Conflicting
+overlap evidence blocks transcription without local fallback. Timestamps are
+offset back to the full audio. Completed chunks and
 reported cost, provider, model, generation ID, and request latency are retained
 in `output/<video>/.openrouter-transcription.json`; unavailable metadata stays
 unknown. Repeating the same command resumes matching chunks. Audio, model,

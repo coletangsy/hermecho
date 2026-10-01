@@ -11,7 +11,11 @@ from typing import Optional
 from tqdm import trange
 
 from .checkpoints import CheckpointStore, fingerprint_data, fingerprint_file
-from .openrouter_transcription import DEFAULT_OPENROUTER_TRANSCRIPTION_MODEL, OpenRouterRequestError
+from .openrouter_transcription import (
+    DEFAULT_OPENROUTER_TRANSCRIPTION_MODEL,
+    TRANSCRIPTION_ASSEMBLY_RULES,
+    OpenRouterRequestError,
+)
 from .progress import emit_progress
 from .subtitles import (
     delivery_gate_report,
@@ -157,7 +161,7 @@ def process_video(config: PipelineConfig) -> None:
             "temperature": config.temperature,
         }
         if transcription_backend == "openrouter":
-            transcription_inputs["rules"] = "openrouter-word-chunks-v1"
+            transcription_inputs["rules"] = TRANSCRIPTION_ASSEMBLY_RULES
         transcription_fingerprint = fingerprint_data(transcription_inputs)
         transcription_segments = (
             None

@@ -205,6 +205,8 @@ def _review_document(output_dir: Path, duration: float,
 
 def run_evaluation(video_path: Path, output_dir: Path, max_cost_usd: float) -> dict[str, Any]:
     """Run one isolated evaluation; preserve partial artifacts on failure."""
+    from .openrouter_transcription import TRANSCRIPTION_ASSEMBLY_RULES, _words_for_output
+
     load_dotenv()
     api_key = os.getenv("OPENROUTER_API_KEY")
     if not api_key:
@@ -229,6 +231,7 @@ def run_evaluation(video_path: Path, output_dir: Path, max_cost_usd: float) -> d
         "duration_seconds": duration, "audio_seconds": audio_duration,
         "language": "ko", "prompt": None, "baseline": "whisper:large",
         "candidates": MODELS, "chunk_seconds": CHUNK_SECONDS,
+        "assembly_rules": TRANSCRIPTION_ASSEMBLY_RULES,
         "overlap_seconds": OVERLAP_SECONDS, "probe": [PROBE_START, PROBE_SECONDS],
         "review_window_seconds": REVIEW_WINDOWS,
         "max_cost_usd": max_cost_usd,
@@ -284,6 +287,7 @@ def run_evaluation(video_path: Path, output_dir: Path, max_cost_usd: float) -> d
     for model in eligible:
         name = model.replace("/", "_")
         collected: list[dict[str, Any]] = []
+        completed = []
         chunks = []
         for index, core_start in enumerate(range(0, math.ceil(audio_duration), CHUNK_SECONDS), 1):
             core_end = min(audio_duration, core_start + CHUNK_SECONDS)
@@ -316,18 +320,22 @@ def run_evaluation(video_path: Path, output_dir: Path, max_cost_usd: float) -> d
                 results[model] = {"status": "chunk_failed", "chunk": index,
                                   "error": response["word_error"], "chunks": chunks}
                 break
-            kept = []
-            for word in response["words"]:
-                absolute = {"word": word["word"], "start": word["start"] + start,
-                            "end": word["end"] + start}
-                midpoint = (absolute["start"] + absolute["end"]) / 2
-                if core_start <= midpoint < core_end:
-                    kept.append(absolute)
-            collected.extend(kept)
             chunks.append({"index": index, "start": start, "end": end,
                            "cost_usd": response["cost_usd"],
                            "elapsed_seconds": response["elapsed_seconds"],
-                           "words_kept": len(kept)})
+                           "words_kept": None})
+            completed.append((
+                {"start": start, "end": end, "core_start": core_start, "core_end": core_end},
+                response,
+            ))
+            try:
+                reconciled = _words_for_output(completed, audio_duration)
+            except RuntimeError as error:
+                results[model] = {"status": "chunk_failed", "chunk": index,
+                                  "error": str(error), "chunks": chunks}
+                break
+            chunks[-1]["words_kept"] = len(reconciled) - len(collected)
+            collected = reconciled
             results[model] = {"status": "running", "chunks": chunks}
             _write_json(output_dir / "progress.json", {"spent_usd": spent,
                                                         "cost_unknown": cost_unknown, "models": results})

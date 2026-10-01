@@ -66,6 +66,67 @@ class TestOpenRouterPipeline(unittest.TestCase):
                 self.assertEqual(srt.call_count, 4)
                 self.assertEqual(remote.call_args.args[1:3], ("other/timed-model", "ko"))
 
+    def test_midpoint_assembled_checkpoint_is_recomputed(self):
+        with tempfile.TemporaryDirectory() as root:
+            audio = Path(root) / "audio.mp3"
+            audio.write_bytes(b"same audio")
+            config = PipelineConfig("clip.mp4", output_dir=root, transcribe_only=True,
+                                    transcription_backend="openrouter", stage_cooldown=0)
+            old_fingerprint = fingerprint_data({
+                "audio": fingerprint_file(str(audio)), "backend": "openrouter",
+                "language": None, "model": config.transcription_model,
+                "temperature": 0.0, "rules": "openrouter-word-chunks-v1",
+            })
+            checkpoint = CheckpointStore(str(Path(root) / "clip" / ".hermecho-checkpoint.json"))
+            checkpoint.save_transcription(old_fingerprint, [{
+                "start": 59.8, "end": 60.1, "text": "hello hello",
+                "words": [{"word": "hello", "start": 59.8, "end": 59.9},
+                          {"word": "hello", "start": 60.0, "end": 60.1}],
+            }], require_words=True)
+            with patch.dict(os.environ, {"OPENROUTER_API_KEY": "test"}), \
+                    patch("hermecho.pipeline.extract_audio", return_value=str(audio)), \
+                    patch("hermecho.openrouter_transcription.transcribe_openrouter",
+                          return_value=self._segments()) as remote, \
+                    patch("hermecho.pipeline.generate_srt") as srt:
+                process_video(config)
+            remote.assert_called_once()
+            self.assertEqual(srt.call_args.args[0], self._segments())
+
+    def test_conflicting_raw_overlap_cache_blocks_without_fallback_or_reupload(self):
+        with tempfile.TemporaryDirectory() as root:
+            audio = Path(root) / "audio.mp3"
+
+            def extract(_path):
+                audio.write_bytes(b"same audio")
+                return str(audio)
+
+            def extract_chunk(_source, destination, *_args):
+                destination.write_bytes(b"chunk")
+
+            bodies = [
+                ({"text": "hello", "words": [{"word": "hello", "start": 59.8, "end": 59.9}]}, {}),
+                ({"text": "different", "words": [{"word": "different", "start": 1, "end": 1.1}]}, {}),
+            ]
+            from hermecho.transcription import transcribe_audio
+
+            with patch.dict(os.environ, {"OPENROUTER_API_KEY": "test"}), \
+                    patch("hermecho.pipeline.extract_audio", side_effect=extract), \
+                    patch("hermecho.pipeline.transcribe_audio", wraps=transcribe_audio) as transcribe, \
+                    patch("hermecho.openrouter_transcription._ffprobe_duration", return_value=61), \
+                    patch("hermecho.openrouter_transcription._extract_audio", side_effect=extract_chunk), \
+                    patch("hermecho.openrouter_transcription._request_transcription", side_effect=bodies) as request, \
+                    patch("hermecho.pipeline.generate_srt") as srt:
+                config = PipelineConfig("clip.mp4", output_dir=root, transcribe_only=True,
+                                        transcription_backend="openrouter", stage_cooldown=0)
+                process_video(config)
+                process_video(config)
+            self.assertEqual(request.call_count, 2)
+            self.assertEqual(transcribe.call_count, 2)
+            self.assertTrue(all(call.kwargs["backend"] == "openrouter" for call in transcribe.call_args_list))
+            srt.assert_not_called()
+            self.assertFalse((Path(root) / "clip" / ".hermecho-checkpoint.json").exists())
+            self.assertTrue((Path(root) / "clip" / ".openrouter-transcription.json").exists())
+
     def test_request_failure_uses_only_whisper_and_local_fingerprint(self):
         with tempfile.TemporaryDirectory() as root:
             audio = Path(root) / "audio.mp3"
