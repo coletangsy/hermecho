@@ -5,6 +5,73 @@ from unittest.mock import patch
 from hermecho.pipeline import PipelineConfig, process_video
 
 
+def test_source_srt_accepts_studio_identifiers_settings_and_decimal_separator(tmp_path):
+    from hermecho.subtitle_bundle import read_source_srt
+    source = tmp_path / "source.srt"
+    source.write_text("cue-id\n-00:00:00.500 --> 00:00:01.001 align:start\nHello\n\n00:00:02,000 --> 00:00:03,000\n[no speech]\n")
+    assert read_source_srt(str(source)) == [
+        {"start": -0.5, "end": 1.001, "text": "Hello"},
+        {"start": 2.0, "end": 3.0, "text": "[no speech]"},
+    ]
+
+
+def test_translation_preserves_source_no_speech_markers_without_model_requests():
+    from hermecho.translation import translate_segments
+    source = [{"start": 2.0, "end": 3.0, "text": "[no speech]"}]
+    with patch("hermecho.translation._translate_chunk") as translate:
+        result = translate_segments(source, target_language="zh-TW", translation_model="test", reference_material=None, preserve_markers=True)
+    assert result == [{**source[0], "source_text": "[no speech]"}]
+    translate.assert_not_called()
+
+
+def test_translation_preserves_markers_between_translated_source_cues():
+    from hermecho.translation import translate_segments
+    source = [{"start": i, "end": i + 1, "text": text} for i, text in enumerate(["Hello", "[no speech]", "Bye"])]
+    with patch("hermecho.translation._translate_chunk", return_value=({"translations": {"0": "你好", "2": "再見"}}, None)):
+        result = translate_segments(source, target_language="zh-TW", translation_model="test", reference_material=None, preserve_markers=True)
+    assert result is not None
+    assert [cue["text"] for cue in result] == ["你好", "[no speech]", "再見"]
+    assert [(cue["start"], cue["end"]) for cue in result] == [(0, 1), (1, 2), (2, 3)]
+
+
+def test_source_srt_pipeline_preserves_marker_timing_without_model_request(tmp_path):
+    video = tmp_path / "clip.mp4"
+    video.write_bytes(b"video")
+    source = tmp_path / "source.srt"
+    source.write_text(
+        "first\n00:00:00,500 --> 00:00:01.500\nHello\n\n"
+        "00:00:02,000 --> 00:00:03,000\n[no speech]\n\n"
+        "last\n00:00:04,000 --> 00:00:05,000\nBye\n"
+    )
+    with patch("hermecho.pipeline._video_duration_seconds", return_value=6), \
+         patch("hermecho.pipeline.is_portrait_video", return_value=False), \
+         patch("hermecho.pipeline.load_reference_material", return_value=""), \
+         patch("hermecho.pipeline.load_locked_terms", return_value={}), \
+         patch(
+             "hermecho.translation._translate_chunk",
+             return_value=({"translations": {"0": "你好", "2": "再見"}}, None),
+         ) as translate_chunk:
+        process_video(
+            PipelineConfig(
+                "clip.mp4",
+                input_dir=str(tmp_path),
+                output_dir=str(tmp_path / "out"),
+                source_srt=str(source),
+                srt_only=True,
+                stage_cooldown=0,
+            )
+        )
+
+    bundle = json.loads(next((tmp_path / "out").rglob("*_subtitle_bundle.json")).read_text())
+    assert [(cue["start_ms"], cue["end_ms"]) for cue in bundle["source_cues"]] == [
+        (500, 1500),
+        (2000, 3000),
+        (4000, 5000),
+    ]
+    assert [cue["text"] for cue in bundle["translation_cues"]] == ["你好", "[no speech]", "再見"]
+    assert [cue["_translation_id"] for cue in translate_chunk.call_args.args[0]] == ["0", "2"]
+
+
 def test_pipeline_preserves_all_source_pairs_without_nontranslation_requests(tmp_path):
     video = tmp_path / "clip.mp4"
     video.write_bytes(b"source")

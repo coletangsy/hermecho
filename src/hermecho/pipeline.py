@@ -8,7 +8,7 @@ import time
 from dataclasses import dataclass
 from datetime import datetime
 from uuid import uuid4
-from typing import Optional
+from typing import Any, Optional
 
 from tqdm import trange
 
@@ -355,7 +355,9 @@ def _process_video(config: PipelineConfig) -> None:
         )
         checkpoint_store.discard_stale_translation(translation_fingerprint)
 
-        def load_accepted_chunk(chunk_index: int, chunk: list[dict]) -> Optional[dict]:
+        def load_accepted_chunk(
+            chunk_index: int, chunk: list[dict[str, Any]]
+        ) -> Optional[dict[str, str]]:
             if config.force:
                 return None
             expected_ids = [
@@ -371,7 +373,7 @@ def _process_video(config: PipelineConfig) -> None:
 
         def save_accepted_chunk(
             chunk_index: int,
-            chunk: list[dict],
+            chunk: list[dict[str, Any]],
             translations: dict[str, str],
         ) -> None:
             checkpoint_store.save_accepted_translation_chunk(
@@ -389,6 +391,7 @@ def _process_video(config: PipelineConfig) -> None:
             locked_terms=locked_terms,
             accepted_chunk_loader=load_accepted_chunk,
             accepted_chunk_saver=save_accepted_chunk,
+            preserve_markers=True,
         )
 
         if translated_sentences is not None:
@@ -483,16 +486,21 @@ def _process_source_srt(config: PipelineConfig) -> None:
         "target_language": config.target_language, "prompt": translation_prompt_fingerprint(),
         "reference": reference, "locked_terms": locked})
     store.discard_stale_translation(key)
-    def load_chunk(index, chunk):
+    def load_chunk(
+        index: int, chunk: list[dict[str, Any]]
+    ) -> Optional[dict[str, str]]:
         if config.force:
             return None
         return store.load_accepted_translation_chunk(key, index, fingerprint_data(chunk),
             [str(s.get("_translation_id", i)) for i, s in enumerate(chunk)])
-    def save_chunk(index, chunk, translations):
+    def save_chunk(
+        index: int, chunk: list[dict[str, Any]], translations: dict[str, str]
+    ) -> None:
         store.save_accepted_translation_chunk(key, index, fingerprint_data(chunk), translations)
     translated = translate_segments(source, target_language=config.target_language,
         translation_model=config.translation_model, reference_material=reference, locked_terms=locked,
-        accepted_chunk_loader=load_chunk, accepted_chunk_saver=save_chunk)
+        accepted_chunk_loader=load_chunk, accepted_chunk_saver=save_chunk,
+        preserve_markers=True)
     if translated is None:
         raise ValueError("Translation Gate blocked final SRT/video delivery")
     translated = preserve_source_translation(source, translated)
