@@ -10,6 +10,7 @@ from unittest.mock import MagicMock, patch
 
 from hermecho import cli
 from hermecho.pipeline import PipelineConfig
+from hermecho.checkpoints import fingerprint_file
 from hermecho.subtitles import apply_delivery_profile
 
 
@@ -101,6 +102,15 @@ class TestCliArguments(unittest.TestCase):
 
 
 class TestPipelineOrchestration(unittest.TestCase):
+    def setUp(self):
+        # Video IO is an external boundary in these orchestration fixtures.
+        media = patch("hermecho.pipeline.fingerprint_file", side_effect=lambda path: "fixture-video" if path.endswith(".mp4") else fingerprint_file(path))
+        media.start()
+        self.addCleanup(media.stop)
+        duration = patch("hermecho.pipeline._video_duration_seconds", return_value=120.0)
+        duration.start()
+        self.addCleanup(duration.stop)
+
     @staticmethod
     def _checkpoint_response(chunk, *_args, **_kwargs):
         return (
@@ -207,18 +217,14 @@ class TestPipelineOrchestration(unittest.TestCase):
             with patch("hermecho.pipeline.extract_audio", side_effect=extract_audio), \
                 patch("hermecho.pipeline.transcribe_audio", return_value=source_segments), \
                 patch(
-                    "hermecho.pipeline.review_source_sentence_boundaries",
+                    "hermecho.translation.review_source_sentence_boundaries",
                     return_value={
                         "decisions": [
                             {"boundary_index": 0, "merge": True, "text": "안녕하세요."}
                         ]
                     },
                 ) as review, \
-                patch("hermecho.pipeline.translate_segments", return_value=translated), \
-                patch(
-                    "hermecho.pipeline.build_delivery_cues",
-                    return_value=self._checkpoint_delivery(translated),
-                ), \
+                patch("hermecho.pipeline.translate_segments", side_effect=lambda sentences, **kwargs: [{**cue, "text": "你好。"} for cue in sentences]), \
                 patch("hermecho.pipeline.load_reference_material", return_value=""), \
                 patch("hermecho.pipeline.load_locked_terms", return_value={}), \
                 patch("hermecho.pipeline.is_portrait_video", return_value=False), \
@@ -230,7 +236,7 @@ class TestPipelineOrchestration(unittest.TestCase):
                 if os.path.exists(path):
                     os.unlink(path)
 
-        review.assert_called_once()
+        review.assert_not_called()
 
     def test_pipeline_excludes_no_speech_from_source_and_translation_delivery(self) -> None:
         with tempfile.NamedTemporaryFile(suffix=".mp3", delete=False) as tmp:
@@ -272,10 +278,6 @@ class TestPipelineOrchestration(unittest.TestCase):
                         patch("hermecho.pipeline.load_reference_material", return_value=""), \
                         patch("hermecho.pipeline.load_locked_terms", return_value={}), \
                         patch("hermecho.pipeline.translate_segments", return_value=translated) as translate, \
-                        patch(
-                            "hermecho.pipeline.build_delivery_cues",
-                            return_value=self._checkpoint_delivery(translated),
-                        ), \
                         patch("hermecho.pipeline.generate_srt") as generate_srt:
                         cli.process_video(config)
 
@@ -417,7 +419,7 @@ class TestPipelineOrchestration(unittest.TestCase):
             self.assertIn(expected_error, messages)
             self.assertIn('"stage": "transcription", "status": "error"', messages)
 
-    def test_portrait_pipeline_applies_delivery_profile_to_both_outputs(self) -> None:
+    def test_portrait_pipeline_preserves_srt_and_renders_separately(self) -> None:
         with tempfile.NamedTemporaryFile(suffix=".mp3", delete=False) as tmp:
             audio_path = tmp.name
             tmp.write(b"fake")
@@ -465,12 +467,6 @@ class TestPipelineOrchestration(unittest.TestCase):
                 patch("hermecho.pipeline.transcribe_audio", return_value=translated), \
                 patch("hermecho.pipeline.build_source_sentences", return_value=translated), \
                 patch("hermecho.pipeline.translate_segments", return_value=translated) as translate, \
-                patch(
-                    "hermecho.pipeline.build_delivery_cues",
-                    side_effect=lambda cues, profile, **_kwargs: apply_delivery_profile(
-                        cues, profile
-                    ),
-                ), \
                 patch("hermecho.pipeline.load_reference_material", return_value=""), \
                 patch("hermecho.pipeline.burn_subtitles_into_video") as burn, \
                 patch("hermecho.video_processing.subprocess.run", return_value=ffprobe_result):
@@ -485,13 +481,11 @@ class TestPipelineOrchestration(unittest.TestCase):
                 srt.read(),
                 """1
 00:00:00,000 --> 00:00:04,000
-這是前段字幕，這是後段需要
-以字數分割的直式影片文字內容
+這是前段字幕，這是後段需要以字數分割的直式影片文字內容
 
 2
 00:00:04,000 --> 00:00:10,000
-甲乙丙丁戊己庚辛壬癸子丑寅卯辰
-巳午未申酉戌亥天地玄黃宇宙洪荒
+甲乙丙丁戊己庚辛壬癸子丑寅卯辰巳午未申酉戌亥天地玄黃宇宙洪荒
 
 """,
             )
@@ -502,16 +496,17 @@ class TestPipelineOrchestration(unittest.TestCase):
             if name.endswith("_delivery_gate.txt")
         )
         with open(report_path, encoding="utf-8") as report:
-            self.assertIn("Repair Limits: 6", report.read())
+            self.assertIn("quality findings are warnings", report.read())
         burn.assert_called_once()
         burn_args, burn_kwargs = burn.call_args
         self.assertEqual(
             burn_args[:2],
             (
                 os.path.abspath(os.path.join("input", "portrait.mp4")),
-                os.path.abspath(srt_path),
+                burn_args[1],
             ),
         )
+        self.assertTrue(burn_args[1].endswith("_render.srt"))
         self.assertTrue(burn_args[2].endswith("_translated.mp4"))
         self.assertEqual(
             burn_kwargs,
@@ -562,10 +557,6 @@ class TestPipelineOrchestration(unittest.TestCase):
                 patch("hermecho.pipeline.transcribe_audio", return_value=transcribed) as transcribe, \
                 patch("hermecho.pipeline.build_source_sentences", return_value=transcribed), \
                 patch("hermecho.pipeline.translate_segments", return_value=translated) as translate, \
-                patch(
-                    "hermecho.pipeline.build_delivery_cues",
-                    return_value=self._checkpoint_delivery(adjusted),
-                ) as deliver, \
                 patch("hermecho.pipeline.generate_srt") as generate_srt, \
                 patch("hermecho.pipeline.is_portrait_video", return_value=False), \
                 patch("hermecho.pipeline.load_reference_material", return_value=""):
@@ -581,9 +572,7 @@ class TestPipelineOrchestration(unittest.TestCase):
             temperature=0.0,
             backend="whisper",
         )
-        self.assertEqual(deliver.call_args.args[0], translated)
-        self.assertNotIn("time_buffer", deliver.call_args.kwargs)
-        generate_srt.assert_called_once_with(adjusted, generate_srt.call_args.args[1])
+        self.assertEqual(generate_srt.call_args.args[0][0]["end"], 1.0)
         self.assertEqual(generate_srt.call_args.args[0][0]["text"], "你好，世界。")
 
     def test_sentence_first_pipeline_translates_source_sentences_with_word_evidence(self) -> None:
@@ -702,8 +691,6 @@ class TestPipelineOrchestration(unittest.TestCase):
                 patch("hermecho.pipeline.is_portrait_video", return_value=False), \
                 patch("hermecho.pipeline.load_reference_material", return_value=""), \
                 patch("hermecho.pipeline.load_locked_terms", return_value={}), \
-                patch("hermecho.pipeline.build_delivery_cues", side_effect=self._checkpoint_delivery), \
-                patch("hermecho.pipeline.delivery_gate_report", return_value="ok"), \
                 patch("hermecho.pipeline.generate_srt"), \
                 patch("hermecho.translation.TOKEN_THRESHOLD", 1), \
                 patch("hermecho.translation._translate_chunk", side_effect=translate_chunk):
@@ -742,8 +729,6 @@ class TestPipelineOrchestration(unittest.TestCase):
                 patch("hermecho.pipeline.is_portrait_video", return_value=False), \
                 patch("hermecho.pipeline.load_reference_material", side_effect=["first reference", "changed reference"]), \
                 patch("hermecho.pipeline.load_locked_terms", return_value={}), \
-                patch("hermecho.pipeline.build_delivery_cues", side_effect=self._checkpoint_delivery), \
-                patch("hermecho.pipeline.delivery_gate_report", return_value="ok"), \
                 patch("hermecho.pipeline.generate_srt"), \
                 patch("hermecho.translation._translate_chunk", side_effect=self._checkpoint_response) as translate:
                 cli.process_video(config)
@@ -776,8 +761,6 @@ class TestPipelineOrchestration(unittest.TestCase):
                 patch("hermecho.pipeline.is_portrait_video", return_value=False), \
                 patch("hermecho.pipeline.load_reference_material", return_value=""), \
                 patch("hermecho.pipeline.load_locked_terms", return_value={}), \
-                patch("hermecho.pipeline.build_delivery_cues", side_effect=self._checkpoint_delivery), \
-                patch("hermecho.pipeline.delivery_gate_report", return_value="ok"), \
                 patch("hermecho.pipeline.generate_srt"), \
                 patch("hermecho.translation._translate_chunk", side_effect=self._checkpoint_response) as translate:
                 cli.process_video(config)
@@ -814,8 +797,6 @@ class TestPipelineOrchestration(unittest.TestCase):
                 patch("hermecho.pipeline.is_portrait_video", return_value=False), \
                 patch("hermecho.pipeline.load_reference_material", return_value=""), \
                 patch("hermecho.pipeline.load_locked_terms", return_value={}), \
-                patch("hermecho.pipeline.build_delivery_cues", side_effect=self._checkpoint_delivery), \
-                patch("hermecho.pipeline.delivery_gate_report", return_value="ok"), \
                 patch("hermecho.pipeline.generate_srt"), \
                 patch("hermecho.translation._translate_chunk", side_effect=self._checkpoint_response) as translate:
                 cli.process_video(base_config)

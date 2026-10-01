@@ -2,6 +2,8 @@
 This module contains functions for translating text using OpenRouter.
 """
 import hashlib
+from contextlib import contextmanager
+from contextvars import ContextVar
 import inspect
 import json
 import os
@@ -18,6 +20,24 @@ from .prompts import (
     build_source_boundary_review_prompt,
     build_translation_prompt,
 )
+
+
+_request_counts: ContextVar[dict | None] = ContextVar("translation_request_counts", default=None)
+
+
+@contextmanager
+def track_translation_requests():
+    """Count application SDK calls; underlying SDK transport retries are excluded."""
+    counts = {}
+    token = _request_counts.set(counts)
+    try:
+        yield counts
+    finally:
+        _request_counts.reset(token)
+
+
+def translation_request_counts() -> dict:
+    return dict(_request_counts.get() or {})
 
 
 # Constants for the sliding window approach
@@ -196,6 +216,9 @@ def _request_json_translation(
     response_text = ""
     usage: Optional[Dict[str, Any]] = None
     try:
+        counts = _request_counts.get()
+        if counts is not None:
+            counts[label] = counts.get(label, 0) + 1
         response = client.chat.completions.create(
             model=translation_model,
             messages=[{"role": "user", "content": prompt_text}],

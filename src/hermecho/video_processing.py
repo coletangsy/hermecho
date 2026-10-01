@@ -240,7 +240,7 @@ def burn_subtitles_into_video(
         print(
             "On macOS (Homebrew), reinstall ffmpeg with subtitle support and retry."
         )
-        return
+        raise RuntimeError("ffmpeg subtitles filter is unavailable")
 
     # Construct the subtitles filter with style options
     # BorderStyle=3 is an opaque box. BorderStyle=1 is outline.
@@ -266,6 +266,8 @@ def burn_subtitles_into_video(
     command = [
         "ffmpeg",
         "-i", video_path,
+        "-map", "0:v:0",
+        "-map", "0:a?",
         "-vf", subtitles_filter,
         "-c:v", "libx264",  # H.264 codec for wide compatibility
         "-pix_fmt", "yuv420p",  # Pixel format for compatibility
@@ -276,6 +278,10 @@ def burn_subtitles_into_video(
         output_video_path,
         "-y",  # Overwrite output file if it exists
     ]
+
+    if os.path.isfile(srt_path) and os.path.getsize(srt_path) == 0:
+        filter_index = command.index("-vf")
+        del command[filter_index:filter_index + 2]
 
     try:
         process = subprocess.Popen(
@@ -342,6 +348,7 @@ def burn_subtitles_into_video(
                 "An error occurred while running ffmpeg to burn subtitles",
                 detail=stderr_output,
             )
+            raise RuntimeError("ffmpeg subtitle rendering failed: " + stderr_output[-2000:])
         else:
             print("Successfully burned subtitles into the video.")
             emit_progress(
@@ -359,6 +366,7 @@ def burn_subtitles_into_video(
             "error",
             "ffmpeg is not installed",
         )
+        raise
     except Exception as e:
         print(f"An unexpected error occurred during subtitle burning: {e}")
         emit_progress(
@@ -368,6 +376,7 @@ def burn_subtitles_into_video(
             detail=str(e),
         )
 
+        raise
 
 def is_ffmpeg_installed() -> bool:
     """
