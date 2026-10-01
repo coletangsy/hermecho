@@ -77,6 +77,171 @@ def test_boundary_repair_without_common_word_and_time_anchors_still_blocks(tmp_p
         )
 
 
+def test_boundary_repair_retries_invalid_word_timestamps(tmp_path):
+    audio = tmp_path / "source.mp3"
+    audio.write_bytes(b"source")
+    checkpoint = tmp_path / "checkpoint.json"
+    left = words(("a", 50), ("b", 51), ("c", 52), ("wrong", 59.5))
+    right = words(("different", 0.5), ("r", 4), ("s", 5), ("t", 6), ("tail", 31))
+    boundary = words(("a", 0), ("b", 1), ("c", 2), ("fixed", 9.5),
+                     ("r", 13), ("s", 14), ("t", 15))
+    invalid_boundary = [dict(word) for word in boundary]
+    invalid_boundary[1]["start"] = 0.1
+    invalid_boundary[1]["end"] = 0.3
+    responses = [
+        ({"text": " ".join(w["word"] for w in value), "words": value},
+         {"cost_usd": 0.01, "elapsed_seconds": 1.0})
+        for value in [left, right, invalid_boundary, boundary]
+    ]
+
+    def extract(_source, destination, _start, _duration):
+        destination.write_bytes(b"chunk")
+
+    with patch.dict("os.environ", {"OPENROUTER_API_KEY": "test-key"}), patch(
+        "hermecho.openrouter_transcription._ffprobe_duration", return_value=120.0,
+    ), patch("hermecho.openrouter_transcription._extract_audio", side_effect=extract), patch(
+        "hermecho.openrouter_transcription._request_transcription", side_effect=responses,
+    ) as request:
+        result = transcribe_openrouter(
+            str(audio), "model", "ko", checkpoint_path=str(checkpoint)
+        )
+
+    assert request.call_count == 4
+    assert [word["word"] for word in result[0]["words"]] == [
+        "a", "b", "c", "fixed", "r", "s", "t", "tail",
+    ]
+    state = json.loads(checkpoint.read_text())
+    repair_metadata = state["boundary_repairs"]["60.0"]["metadata"]
+    assert repair_metadata["attempt_count"] == 2
+    assert repair_metadata["cost_usd"] == pytest.approx(0.02)
+    assert state["metadata"]["cost_usd"] == pytest.approx(0.04)
+
+
+def test_exhausted_boundary_retry_history_resumes_and_is_aggregated(tmp_path):
+    audio = tmp_path / "source.mp3"
+    audio.write_bytes(b"source")
+    checkpoint = tmp_path / "checkpoint.json"
+    left = words(("a", 50), ("b", 51), ("c", 52), ("wrong", 59.5))
+    right = words(("different", 0.5), ("r", 4), ("s", 5), ("t", 6), ("tail", 31))
+    boundary = words(("a", 0), ("b", 1), ("c", 2), ("fixed", 9.5),
+                     ("r", 13), ("s", 14), ("t", 15))
+    invalid_boundary = [dict(word) for word in boundary]
+    invalid_boundary[1]["start"] = 0.1
+    invalid_boundary[1]["end"] = 0.3
+    responses = [
+        ({"text": " ".join(w["word"] for w in value), "words": value}, {
+            "cost_usd": 0.01, "model": "model", "provider": "provider-a",
+            "generation_id": f"generation-{index}", "elapsed_seconds": 0.1,
+        })
+        for index, value in enumerate([left, right])
+    ]
+    responses.extend((
+        {"text": " ".join(w["word"] for w in invalid_boundary), "words": invalid_boundary}, {
+            "cost_usd": cost, "model": "model", "provider": "provider-a",
+            "generation_id": f"generation-{index}", "elapsed_seconds": 0.1,
+        }
+    ) for index, cost in enumerate((0.02, 0.03, 0.04), start=2))
+
+    def extract(_source, destination, _start, _duration):
+        destination.write_bytes(b"chunk")
+
+    def fake_request(*_args):
+        return responses.pop(0)
+
+    with patch.dict("os.environ", {"OPENROUTER_API_KEY": "test-key"}), patch(
+        "hermecho.openrouter_transcription._ffprobe_duration", return_value=120.0,
+    ), patch("hermecho.openrouter_transcription._extract_audio", side_effect=extract), patch(
+        "hermecho.openrouter_transcription._request_transcription", side_effect=fake_request,
+    ) as request:
+        with pytest.raises(RuntimeError, match="boundary repair near 60s failed"):
+            transcribe_openrouter(str(audio), "model", "ko", checkpoint_path=str(checkpoint))
+        partial = json.loads(checkpoint.read_text())
+        assert len(partial["chunks"]) == 2
+        assert len(partial["retry_history"]) == 1
+        history = partial["retry_history"][0]
+        assert history["scope"] == "boundary"
+        assert history["identifier"] == "60.0"
+        assert history["attempt_count"] == 3
+        assert all("text" not in attempt and "words" not in attempt
+                   for attempt in history["attempts"])
+
+        responses.append((
+            {"text": " ".join(w["word"] for w in boundary), "words": boundary}, {
+                "cost_usd": 0.05, "model": "model", "provider": "provider-a",
+                "generation_id": "generation-5", "elapsed_seconds": 0.1,
+            }
+        ))
+        result = transcribe_openrouter(
+            str(audio), "model", "ko", checkpoint_path=str(checkpoint)
+        )
+        state = json.loads(checkpoint.read_text())
+
+    assert request.call_count == 6
+    assert [word["word"] for word in result[0]["words"]] == [
+        "a", "b", "c", "fixed", "r", "s", "t", "tail",
+    ]
+    assert state["metadata"]["cost_usd"] == pytest.approx(0.16)
+    assert len(state["retry_history"]) == 1
+
+
+def test_boundary_request_failure_after_invalid_timestamp_persists_prior_metadata(tmp_path):
+    audio = tmp_path / "source.mp3"
+    audio.write_bytes(b"source")
+    checkpoint = tmp_path / "checkpoint.json"
+    left = words(("a", 50), ("b", 51), ("c", 52), ("wrong", 59.5))
+    right = words(("different", 0.5), ("r", 4), ("s", 5), ("t", 6), ("tail", 31))
+    boundary = words(("a", 0), ("b", 1), ("c", 2), ("fixed", 9.5),
+                     ("r", 13), ("s", 14), ("t", 15))
+    invalid_boundary = [dict(word) for word in boundary]
+    invalid_boundary[1]["start"] = 0.1
+    invalid_boundary[1]["end"] = 0.3
+    responses = [
+        ({"text": " ".join(w["word"] for w in value), "words": value}, {
+            "cost_usd": 0.01, "model": "model", "provider": "provider-a",
+            "generation_id": f"generation-{index}", "elapsed_seconds": 0.1,
+        })
+        for index, value in enumerate([left, right])
+    ]
+    responses.extend([
+        ({"text": " ".join(w["word"] for w in invalid_boundary), "words": invalid_boundary}, {
+            "cost_usd": 0.02, "model": "model", "provider": "provider-a",
+            "generation_id": "generation-invalid", "elapsed_seconds": 0.1,
+        }),
+        OpenRouterRequestError("timeout"),
+    ])
+
+    def extract(_source, destination, _start, _duration):
+        destination.write_bytes(b"chunk")
+
+    def fake_request(*_args):
+        response = responses.pop(0)
+        if isinstance(response, Exception):
+            raise response
+        return response
+
+    with patch.dict("os.environ", {"OPENROUTER_API_KEY": "test-key"}), patch(
+        "hermecho.openrouter_transcription._ffprobe_duration", return_value=120.0,
+    ), patch("hermecho.openrouter_transcription._extract_audio", side_effect=extract), patch(
+        "hermecho.openrouter_transcription._request_transcription", side_effect=fake_request,
+    ) as request:
+        with pytest.raises(RuntimeError, match="boundary repair near 60s failed") as error:
+            transcribe_openrouter(str(audio), "model", "ko", checkpoint_path=str(checkpoint))
+
+    assert not isinstance(error.value, OpenRouterRequestError)
+    assert request.call_count == 4
+    state = json.loads(checkpoint.read_text())
+    assert len(state["chunks"]) == 2
+    assert len(state["retry_history"]) == 1
+    history = state["retry_history"][0]
+    assert history["status"] == "interrupted"
+    assert history["attempt_count"] == 1
+    assert history["attempts"][0]["generation_id"] == "generation-invalid"
+    assert history["attempts"][0]["cost_usd"] == pytest.approx(0.02)
+    assert all("text" not in attempt and "words" not in attempt
+               for attempt in history["attempts"])
+    assert len(history["diagnostics"]) == 1
+
+
 def test_boundary_repair_does_not_guess_between_repeated_word_anchors():
     from hermecho.openrouter_transcription import _splice_boundary_words
 

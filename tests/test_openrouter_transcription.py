@@ -9,6 +9,7 @@ from unittest.mock import MagicMock, patch
 from hermecho.openrouter_transcription import (
     DEFAULT_OPENROUTER_TRANSCRIPTION_MODEL,
     OpenRouterRequestError,
+    OpenRouterWordTimestampError,
     _aggregate_metadata,
     _chunk_specs,
     _request_transcription,
@@ -197,6 +198,242 @@ class TestOpenRouterTranscription(unittest.TestCase):
                         if index:
                             _response_words(body, 10)
                     self.assertNotIsInstance(error.exception, OpenRouterRequestError)
+
+    def test_retries_invalid_word_timestamps_before_checkpointing_chunk(self) -> None:
+        responses = [
+            ({"text": "hello world", "words": _words(
+                ("hello", 0.0, 0.8), ("world", 0.7, 1.1),
+            )}, {
+                "cost_usd": 0.01, "model": "model", "provider": "provider-a",
+                "generation_id": "generation-1", "elapsed_seconds": 0.1,
+            }),
+            ({"text": "hello world", "words": _words(
+                ("hello", 0.0, 0.8), ("world", 0.8, 1.1),
+            )}, {
+                "cost_usd": 0.02, "model": "model", "provider": "provider-a",
+                "generation_id": "generation-2", "elapsed_seconds": 0.2,
+            }),
+        ]
+
+        def fake_request(*_args):
+            response = responses.pop(0)
+            return response
+
+        def fake_extract(_source, destination, _start, _duration):
+            destination.write_bytes(b"chunk")
+
+        with tempfile.TemporaryDirectory() as temporary_dir:
+            source = Path(temporary_dir) / "source.mp3"
+            source.write_bytes(b"source")
+            checkpoint = Path(temporary_dir) / "checkpoint.json"
+            with patch.dict("os.environ", {"OPENROUTER_API_KEY": "test-key"}), patch(
+                "hermecho.openrouter_transcription._ffprobe_duration", return_value=1.5
+            ), patch(
+                "hermecho.openrouter_transcription._extract_audio", side_effect=fake_extract
+            ), patch(
+                "hermecho.openrouter_transcription._request_transcription",
+                side_effect=fake_request,
+            ) as request, patch(
+                "hermecho.openrouter_transcription.emit_progress"
+            ) as progress:
+                segments = transcribe_openrouter(
+                    str(source), "model", checkpoint_path=str(checkpoint)
+                )
+                state = json.loads(checkpoint.read_text())
+
+        assert request.call_count == 2
+        assert [word["word"] for word in segments[0]["words"]] == ["hello", "world"]
+        metadata = state["chunks"]["0"]["metadata"]
+        assert metadata["attempt_count"] == 2
+        assert metadata["cost_usd"] == 0.03
+        assert metadata["elapsed_seconds"] == 0.3
+        assert metadata["generation_id"] == "generation-2"
+        assert len(metadata["retry_diagnostics"]) == 1
+        retry = [call for call in progress.call_args_list if "Retrying" in call.args[2]]
+        assert len(retry) == 1
+        assert retry[0].kwargs["current"] == 1
+        assert retry[0].kwargs["total"] == 1
+
+    def test_exhausted_timestamp_retries_do_not_cache_invalid_chunk(self) -> None:
+        invalid = {"text": "hello world", "words": _words(
+            ("hello", 0.0, 0.8), ("world", 0.7, 1.1),
+        )}
+
+        def fake_request(*_args):
+            return invalid, {
+                "cost_usd": 0.01, "model": "model", "provider": "provider-a",
+                "generation_id": "generation", "elapsed_seconds": 0.1,
+            }
+
+        def fake_extract(_source, destination, _start, _duration):
+            destination.write_bytes(b"chunk")
+
+        with tempfile.TemporaryDirectory() as temporary_dir:
+            source = Path(temporary_dir) / "source.mp3"
+            source.write_bytes(b"source")
+            checkpoint = Path(temporary_dir) / "checkpoint.json"
+            with patch.dict("os.environ", {"OPENROUTER_API_KEY": "test-key"}), patch(
+                "hermecho.openrouter_transcription._ffprobe_duration", return_value=1.5
+            ), patch(
+                "hermecho.openrouter_transcription._extract_audio", side_effect=fake_extract
+            ), patch(
+                "hermecho.openrouter_transcription._request_transcription",
+                side_effect=fake_request,
+            ) as request:
+                with self.assertRaisesRegex(OpenRouterWordTimestampError, "attempt 3"):
+                    transcribe_openrouter(
+                        str(source), "model", checkpoint_path=str(checkpoint)
+                    )
+
+            state = json.loads(checkpoint.read_text())
+
+        assert request.call_count == 3
+        assert state["status"] == "partial"
+        assert state["chunks"] == {}
+
+    def test_exhausted_retry_history_resumes_and_aggregates_each_charge_once(self) -> None:
+        invalid = {"text": "hello world", "words": _words(
+            ("hello", 0.0, 0.8), ("world", 0.7, 1.1),
+        )}
+        responses = [
+            ({"text": "one two three edge", "words": _words(
+                ("one", 50.0, 50.2), ("two", 51.0, 51.2),
+                ("three", 52.0, 52.2), ("edge", 59.5, 59.8),
+            )}, {
+                "cost_usd": 0.1, "model": "model", "provider": "provider-a",
+                "generation_id": "generation-0", "elapsed_seconds": 0.1,
+            }),
+            *[(invalid, {
+                "cost_usd": cost, "model": "model", "provider": "provider-a",
+                "generation_id": f"generation-{index}", "elapsed_seconds": 0.1,
+            }) for index, cost in enumerate((0.01, 0.02, 0.03), start=1)],
+        ]
+
+        def fake_request(*_args):
+            return responses.pop(0)
+
+        def fake_extract(_source, destination, _start, _duration):
+            destination.write_bytes(b"chunk")
+
+        with tempfile.TemporaryDirectory() as temporary_dir:
+            source = Path(temporary_dir) / "source.mp3"
+            source.write_bytes(b"source")
+            checkpoint = Path(temporary_dir) / "checkpoint.json"
+            with patch.dict("os.environ", {"OPENROUTER_API_KEY": "test-key"}), patch(
+                "hermecho.openrouter_transcription._ffprobe_duration", return_value=62.0
+            ), patch(
+                "hermecho.openrouter_transcription._extract_audio", side_effect=fake_extract
+            ), patch(
+                "hermecho.openrouter_transcription._request_transcription",
+                side_effect=fake_request,
+            ) as request:
+                with self.assertRaises(OpenRouterWordTimestampError):
+                    transcribe_openrouter(
+                        str(source), "model", checkpoint_path=str(checkpoint)
+                    )
+                partial = json.loads(checkpoint.read_text())
+                self.assertEqual(list(partial["chunks"]), ["0"])
+                self.assertEqual(len(partial["retry_history"]), 1)
+                history = partial["retry_history"][0]
+                self.assertEqual(history["scope"], "chunk")
+                self.assertEqual(history["identifier"], "1")
+                self.assertEqual(history["attempt_count"], 3)
+                self.assertEqual(
+                    [attempt["generation_id"] for attempt in history["attempts"]],
+                    ["generation-1", "generation-2", "generation-3"],
+                )
+                self.assertTrue(all("text" not in attempt and "words" not in attempt
+                                    for attempt in history["attempts"]))
+
+                responses.append((
+                    {"text": "edge hello world tail", "words": _words(
+                        ("edge", 0.5, 0.8), ("hello", 2.1, 2.3),
+                        ("world", 2.5, 2.8), ("tail", 2.9, 3.0),
+                    )},
+                    {
+                        "cost_usd": 0.04, "model": "model", "provider": "provider-a",
+                        "generation_id": "generation-4", "elapsed_seconds": 0.1,
+                    },
+                ))
+                result = transcribe_openrouter(
+                    str(source), "model", checkpoint_path=str(checkpoint)
+                )
+                state = json.loads(checkpoint.read_text())
+
+        self.assertEqual(request.call_count, 5)
+        self.assertEqual(
+            [word["word"] for word in result[0]["words"]],
+            ["one", "two", "three", "edge", "hello", "world", "tail"],
+        )
+        self.assertEqual(state["metadata"]["cost_usd"], 0.2)
+        self.assertEqual(state["metadata"]["elapsed_seconds"], 0.5)
+        self.assertEqual(len(state["retry_history"]), 1)
+        self.assertCountEqual(
+            state["metadata"]["generation_id"],
+            [f"generation-{index}" for index in range(5)],
+        )
+
+    def test_request_failure_after_invalid_timestamp_persists_prior_metadata(self) -> None:
+        invalid = {"text": "hello world", "words": _words(
+            ("hello", 0.0, 0.8), ("world", 0.7, 1.1),
+        )}
+        responses = [
+            (invalid, {
+                "cost_usd": 0.01, "model": "model", "provider": "provider-a",
+                "generation_id": "generation-invalid", "elapsed_seconds": 0.1,
+            }),
+            OpenRouterRequestError("timeout"),
+        ]
+
+        def fake_request(*_args):
+            response = responses.pop(0)
+            if isinstance(response, Exception):
+                raise response
+            return response
+
+        def fake_extract(_source, destination, _start, _duration):
+            destination.write_bytes(b"chunk")
+
+        with tempfile.TemporaryDirectory() as temporary_dir:
+            source = Path(temporary_dir) / "source.mp3"
+            source.write_bytes(b"source")
+            checkpoint = Path(temporary_dir) / "checkpoint.json"
+            with patch.dict("os.environ", {"OPENROUTER_API_KEY": "test-key"}), patch(
+                "hermecho.openrouter_transcription._ffprobe_duration", return_value=1.5
+            ), patch(
+                "hermecho.openrouter_transcription._extract_audio", side_effect=fake_extract
+            ), patch(
+                "hermecho.openrouter_transcription._request_transcription",
+                side_effect=fake_request,
+            ) as request:
+                with self.assertRaises(OpenRouterRequestError):
+                    transcribe_openrouter(
+                        str(source), "model", checkpoint_path=str(checkpoint)
+                    )
+            state = json.loads(checkpoint.read_text())
+
+        self.assertEqual(request.call_count, 2)
+        self.assertEqual(state["chunks"], {})
+        self.assertEqual(len(state["retry_history"]), 1)
+        history = state["retry_history"][0]
+        self.assertEqual(history["status"], "interrupted")
+        self.assertEqual(history["attempt_count"], 1)
+        self.assertEqual(history["attempts"][0]["generation_id"], "generation-invalid")
+        self.assertEqual(history["attempts"][0]["cost_usd"], 0.01)
+        self.assertTrue(all("text" not in attempt and "words" not in attempt
+                            for attempt in history["attempts"]))
+        self.assertEqual(len(history["diagnostics"]), 1)
+
+    def test_retry_history_with_missing_cost_stays_unknown(self) -> None:
+        result = _aggregate_metadata(
+            [({}, {"metadata": {"cost_usd": 0.1, "elapsed_seconds": 1.0}})],
+            retry_history=[{
+                "attempts": [{"cost_usd": None, "elapsed_seconds": None}],
+                "diagnostics": ["invalid timestamps"],
+            }],
+        )
+        self.assertIsNone(result["cost_usd"])
+        self.assertIsNone(result["elapsed_seconds"])
 
     def test_silence_does_not_hide_malformed_nested_transcript_evidence(self) -> None:
         with self.assertRaises(RuntimeError):

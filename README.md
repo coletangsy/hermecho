@@ -214,8 +214,13 @@ transcription of the entire audio. Successful remote chunks remain available for
 a later retry, but the delivered Source Transcript contains only Whisper words.
 The local result is cached with the local backend fingerprint; another explicit
 OpenRouter run retries the remote path. Missing credentials, invalid parameters,
-authentication errors, malformed responses, and missing or invalid word timing
-block transcription without fallback. There are no automatic paid API retries.
+authentication errors, malformed responses, and missing word timing block
+transcription without fallback. Invalid word-timestamp responses receive
+up to two additional requests with the same backend and model; these bounded
+requests may incur charges. Each rejected response is retained only as request
+metadata plus validation diagnostics in the checkpoint; a successful response
+is retained as validated Source Words. Transport and other request failures do
+not receive automatic paid retries.
 
 For translated runs, `--locked-terms-file` is required and defaults to
 `references/locked_terms.json`. It is a machine-readable JSON source-to-target
