@@ -1,5 +1,6 @@
 import os
 import tempfile
+import tracemalloc
 import unittest
 import unicodedata
 from unittest.mock import patch
@@ -155,6 +156,22 @@ class TestDeliveryProfiles(unittest.TestCase):
 
         self.assertLessEqual(len(result.cues[0]["text"].splitlines()), 2)
         self.assertEqual(result.cues[0]["text"], "hello world 一")
+
+    def test_wrap_long_repeated_text_uses_bounded_memory(self) -> None:
+        landscape = delivery_profile_for_orientation(is_portrait=False)
+        text = "哈" * 1024
+
+        tracemalloc.start()
+        try:
+            result = apply_delivery_profile(
+                [{"start": 0.0, "end": 2.46, "text": text}], landscape
+            )
+            _, peak = tracemalloc.get_traced_memory()
+        finally:
+            tracemalloc.stop()
+
+        self.assertEqual(result.cues[0]["text"], "哈" * 512 + "\n" + "哈" * 512)
+        self.assertLess(peak, len(text) * 64)
 
     def test_wrap_keeps_common_half_width_tokens_intact(self) -> None:
         portrait = delivery_profile_for_orientation(is_portrait=True)

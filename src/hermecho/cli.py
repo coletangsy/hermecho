@@ -6,6 +6,7 @@ from typing import Optional, Sequence
 
 from dotenv import load_dotenv
 
+from .openrouter_transcription import DEFAULT_OPENROUTER_TRANSCRIPTION_MODEL
 from .pipeline import PipelineConfig, process_video
 from .video_processing import is_ffmpeg_installed
 
@@ -14,7 +15,7 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     """Parse Hermecho command-line arguments."""
     parser = argparse.ArgumentParser(
         description=(
-            "Transcribe a video with local Whisper, translate through OpenRouter, "
+            "Transcribe a video with local Whisper or explicit OpenRouter ASR, translate through OpenRouter, "
             "then burn subtitles. Omit --transcribe-only for the full "
             "translate + burn pipeline."
         ),
@@ -38,9 +39,14 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser.add_argument("--model", default="large", help="The Whisper model for transcription.")
     parser.add_argument(
         "--transcription-backend",
-        choices=("auto", "whisper", "mlx"),
+        choices=("auto", "whisper", "mlx", "openrouter"),
         default="auto",
-        help="Transcription runtime; auto uses MLX only with approved faster comparison evidence, otherwise portable Whisper. MLX requires Apple Silicon and .[mlx].",
+        help="Transcription runtime; auto stays local. MLX requires Apple Silicon and .[mlx]. Explicit openrouter uploads audio using OPENROUTER_API_KEY.",
+    )
+    parser.add_argument(
+        "--transcription-model",
+        default=DEFAULT_OPENROUTER_TRANSCRIPTION_MODEL,
+        help="OpenRouter transcription model slug; used only with --transcription-backend openrouter.",
     )
     parser.add_argument(
         "--language",
@@ -68,7 +74,7 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
             "(default: references/locked_terms.json)."
         ),
     )
-    parser.add_argument("--temperature", type=float, default=0.0, help="Whisper sampling temperature.")
+    parser.add_argument("--temperature", type=float, default=0.0, help="Transcription sampling temperature.")
     parser.add_argument("--font_name", default="Heiti TC", help="Font name for subtitles.")
     parser.add_argument(
         "--fonts-dir",

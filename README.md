@@ -1,10 +1,11 @@
 # Hermecho
 
-Hermecho translates videos with Korean audio into Traditional Chinese (Taiwan) subtitles. It uses local Whisper for transcription, OpenRouter for translation, writes timestamped SRT files, and can hard-burn subtitles into a translated MP4.
+Hermecho translates videos with Korean audio into Traditional Chinese (Taiwan) subtitles. It uses local Whisper or explicitly selected OpenRouter ASR for transcription, OpenRouter for translation, writes timestamped SRT files, and can hard-burn subtitles into a translated MP4.
 
 ## Features
 
 - Local Whisper transcription in the normal pipeline with no transcription API usage.
+- Optional OpenRouter word-timestamp transcription with resumable audio chunks.
 - OpenRouter translation with reference-file context for names and terms.
 - Translation Gate rejects incomplete model responses and enforces JSON Locked Terms.
 - Source Sentence grouping and Delivery Profile guardrails for subtitle timing and layout.
@@ -149,14 +150,14 @@ hermecho clip.mp4 --input_dir ./videos --output_dir ./exports
 
 For agent-operated jobs, use [run-hermecho-job](.agents/skills/run-hermecho-job/SKILL.md).
 Monitoring an existing session does not launch another process. Transcribe-only
-runs do not need translation credentials or Locked Terms; translated and MLX
+runs using a local backend do not need translation credentials or Locked Terms; translated and MLX
 comparison runs validate both before starting. Verify the expected artifacts
 and gate reports even when the CLI exits with status zero.
 
 The full pipeline is:
 
 ```text
-extract audio -> local Whisper transcription -> Source Sentences -> OpenRouter Translation Gate -> Delivery Gate -> SRT -> optional MP4 burn-in
+extract audio -> selected transcription backend -> Source Sentences -> OpenRouter Translation Gate -> Delivery Gate -> SRT -> optional MP4 burn-in
 ```
 
 Sentence-first delivery is the supported translated-subtitle path after the approved Phase 3 review:
@@ -165,13 +166,46 @@ Sentence-first delivery is the supported translated-subtitle path after the appr
 hermecho clip.mp4
 ```
 
+Select OpenRouter transcription explicitly for source SRT or translated output:
+
+```bash
+hermecho clip.mp4 --transcription-backend openrouter --transcribe-only
+hermecho clip.mp4 --transcription-backend openrouter \
+  --transcription-model microsoft/mai-transcribe-2 --language ko --srt-only
+```
+
+`--transcription-backend openrouter` authorizes uploading audio and requires
+`OPENROUTER_API_KEY`. The default remote model is `microsoft/mai-transcribe-2`;
+`--model` still selects the local Whisper model used for fallback. `auto` stays
+local even when an API key exists. Omit `--language` for remote auto-detection.
+MAI uses verbatim transcription without diarization or keyword biasing, following
+the [OpenRouter speech-to-text API](https://openrouter.ai/docs/guides/overview/multimodal/stt).
+Other model slugs must return complete word timestamps to work in this pipeline.
+
+Remote audio is converted to mono 16 kHz MP3 and sent in 60-second core ranges
+with one second of context on each side. Word midpoints select the owning core
+range and timestamps are offset back to the full audio. Completed chunks and
+reported cost, provider, model, generation ID, and request latency are retained
+in `output/<video>/.openrouter-transcription.json`; unavailable metadata stays
+unknown. Repeating the same command resumes matching chunks. Audio, model,
+language, or temperature changes invalidate them; `--force` recomputes them.
+
+Network failures, timeouts, HTTP 408/429, and server errors trigger local Whisper
+transcription of the entire audio. Successful remote chunks remain available for
+a later retry, but the delivered Source Transcript contains only Whisper words.
+The local result is cached with the local backend fingerprint; another explicit
+OpenRouter run retries the remote path. Missing credentials, invalid parameters,
+authentication errors, malformed responses, and missing or invalid word timing
+block transcription without fallback. There are no automatic paid API retries.
+
 For translated runs, `--locked-terms-file` is required and defaults to
 `references/locked_terms.json`. It is a machine-readable JSON source-to-target
 mapping enforced by the Translation Gate; a missing or invalid mapping blocks
 translation and final SRT/MP4 delivery. `--reference_file` remains separate
-Markdown prompt context. Accepted translations preserve punctuation for both
-landscape and portrait delivery; portrait processing may wrap or split cues but
-does not remove accepted punctuation. Delivery Cues end at their last mapped
+Markdown prompt context. The Translation Gate accepts nonempty translations
+even when they omit source sentence terminal punctuation. Delivery preserves
+whatever punctuation the accepted translation contains; portrait processing
+may wrap or split cues but does not remove it. Delivery Cues end at their last mapped
 Source Word timestamp; the pipeline does not extend them into the following gap.
 Full translated runs review only suspicious short or incomplete Source Sentence
 boundaries before translation. The review can merge adjacent spans after strict
@@ -190,13 +224,14 @@ Run `hermecho --help` for the full list.
 | --- | --- |
 | `video_filename` | File name inside `--input_dir`. |
 | `--model` | Whisper model size, default `large`. |
-| `--transcription-backend` | `auto`, `whisper`, or Apple-Silicon-only `mlx`. `auto` selects MLX only with approved faster local comparison evidence; otherwise it uses Whisper. MLX supports `large` / `large-v3` as large-v3. |
+| `--transcription-backend` | `auto`, `whisper`, Apple-Silicon-only `mlx`, or explicit `openrouter`. `auto` selects MLX only with approved faster local comparison evidence; otherwise it uses Whisper. MLX supports `large` / `large-v3` as large-v3. |
+| `--transcription-model` | OpenRouter ASR model slug, default `microsoft/mai-transcribe-2`; only used with the `openrouter` backend. |
 | `--language` | Source audio language, auto-detected by default. |
 | `--target_language` | Translation target, default `Traditional Chinese (Taiwan)`. |
 | `--translation_model` | OpenRouter model slug, default `deepseek/deepseek-v4.1-flash`. |
 | `--reference_file` | Translation reference material, default `references/tripleS.md`. |
 | `--locked-terms-file` | Required JSON source-to-target mapping for translated runs; defaults to `references/locked_terms.json`. Missing or invalid mappings block translation and final SRT/MP4 delivery. |
-| `--temperature` | Whisper sampling temperature, default `0.0`. |
+| `--temperature` | Transcription sampling temperature, default `0.0`. |
 | `--transcribe-only` | Write source-language SRT and stop. |
 | `--srt-only` | Write translated SRT and skip video burn-in. |
 | `--save-source-transcript` | Also write source-language SRT during a translated run. |

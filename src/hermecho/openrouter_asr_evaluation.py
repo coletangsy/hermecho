@@ -72,25 +72,29 @@ def _extract_audio(source: Path, destination: Path, start: float = 0,
 def _normalise_words(response: dict[str, Any], duration: float) -> list[dict[str, Any]]:
     raw_words = response.get("words")
     if raw_words is None and isinstance(response.get("segments"), list):
-        raw_words = [word for segment in response["segments"]
-                     if isinstance(segment, dict) and isinstance(segment.get("words"), list)
-                     for word in segment["words"]]
+        raw_words = []
+        for segment in response["segments"]:
+            if not isinstance(segment, dict) or not isinstance(segment.get("words"), list):
+                raise ValueError("Response contains a segment without word-level timestamps")
+            raw_words.extend(segment["words"])
     if not isinstance(raw_words, list) or not raw_words:
         raise ValueError("Response has no word-level timestamps")
     words = []
-    previous_start = -1.0
+    previous_end = 0.0
     for raw in raw_words:
         if not isinstance(raw, dict) or not isinstance(raw.get("word"), str) or not raw["word"].strip():
             raise ValueError("Response contains a malformed word")
         try:
+            if isinstance(raw["start"], bool) or isinstance(raw["end"], bool):
+                raise ValueError("Boolean timestamps are not numeric evidence")
             start, end = float(raw["start"]), float(raw["end"])
-        except (KeyError, TypeError, ValueError) as error:
+        except (KeyError, TypeError, ValueError, OverflowError) as error:
             raise ValueError("Response contains a word without numeric timestamps") from error
         if (not math.isfinite(start) or not math.isfinite(end) or start < 0
-                or start > end or end > duration + 2 or start < previous_start):
+                or start > end or end > duration + 2 or start < previous_end):
             raise ValueError("Response contains invalid or unordered word timestamps")
         words.append({"word": raw["word"], "start": start, "end": end})
-        previous_start = start
+        previous_end = end
     return words
 
 
@@ -130,7 +134,7 @@ def _request_transcription(audio_path: Path, model: str, api_key: str,
         raise CostUnknownError("OpenRouter returned a non-object response; cost is unknown")
     usage = body.get("usage")
     cost = usage.get("cost") if isinstance(usage, dict) else None
-    if not isinstance(cost, (int, float)) or not math.isfinite(cost) or cost < 0:
+    if isinstance(cost, bool) or not isinstance(cost, (int, float)) or not math.isfinite(cost) or cost < 0:
         raise CostUnknownError("OpenRouter response has no usable usage.cost")
     result = {
         "model": model,
@@ -174,8 +178,8 @@ def _timing_summary(words: list[dict[str, Any]]) -> dict[str, Any]:
         if gap >= 5:
             gaps.append({"start": round(left["end"], 3),
                          "end": round(right["start"], 3)})
-    return {"timed_words": len(words), "first_word_second": words[0]["start"],
-            "last_word_second": words[-1]["end"], "gaps_at_least_5_seconds": gaps,
+    return {"timed_words": len(words), "first_word_second": words[0]["start"] if words else None,
+            "last_word_second": words[-1]["end"] if words else None, "gaps_at_least_5_seconds": gaps,
             "zero_duration_words": zero_duration, "words_over_3_seconds": long_words}
 
 
@@ -329,7 +333,7 @@ def run_evaluation(video_path: Path, output_dir: Path, max_cost_usd: float) -> d
                                                         "cost_unknown": cost_unknown, "models": results})
         else:
             full_cost = sum(chunk["cost_usd"] for chunk in chunks)
-            results[model] = {"status": "complete", "words": collected,
+            results[model] = {"status": "complete" if collected else "no_timed_words", "words": collected,
                               "chunks": chunks, "timing": _timing_summary(collected),
                               "probe_cost_usd": probe_costs[model],
                               "full_cost_usd": full_cost,

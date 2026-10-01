@@ -1,4 +1,5 @@
 import json
+import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -9,6 +10,7 @@ from hermecho.openrouter_asr_evaluation import (
     _request_transcription,
     _timing_summary,
     main,
+    run_evaluation,
 )
 
 
@@ -65,6 +67,92 @@ class TestOpenRouterAsrEvaluation(unittest.TestCase):
         self.assertEqual(result["cost_usd"], 0.004)
         self.assertEqual(result["generation_id"], "generation-1")
 
+    def test_rejects_overlapping_words_even_with_ordered_starts(self) -> None:
+        with self.assertRaisesRegex(ValueError, "invalid or unordered"):
+            _normalise_words({"words": [
+                {"word": "first", "start": 0, "end": 2},
+                {"word": "second", "start": 1, "end": 3},
+            ]}, 10)
+
+    def test_rejects_malformed_nested_segment_without_dropping_it(self) -> None:
+        with self.assertRaisesRegex(ValueError, "segment without word-level"):
+            _normalise_words({"segments": [
+                {"words": [{"word": "first", "start": 0, "end": 1}]},
+                {"text": "lost speech", "words": "invalid"},
+            ]}, 10)
+
+    def test_rejects_boolean_and_overflowing_timestamps(self) -> None:
+        for invalid_start in (True, 10 ** 1000):
+            with self.subTest(start_type=type(invalid_start).__name__):
+                with self.assertRaisesRegex(ValueError, "numeric timestamps"):
+                    _normalise_words({"words": [
+                        {"word": "first", "start": invalid_start, "end": 1},
+                    ]}, 10)
+
+    def test_evaluation_stops_requests_at_budget_or_unknown_cost(self) -> None:
+        for response, expected_status in (
+            ({"words": [{"word": "a", "start": 0, "end": 1}],
+              "cost_usd": 1.0}, "budget_exhausted"),
+            (CostUnknownError("unknown cost"), "cost_unknown"),
+        ):
+            with self.subTest(expected_status=expected_status), tempfile.TemporaryDirectory() as root:
+                video = Path(root) / "video.mp4"
+                video.write_bytes(b"fake video")
+                output = Path(root) / "evaluation"
+
+                def extract(_source, destination, *_args):
+                    destination.write_bytes(b"fake audio")
+
+                with patch.dict("os.environ", {"OPENROUTER_API_KEY": "test"}), \
+                        patch("hermecho.openrouter_asr_evaluation._ffprobe_duration", return_value=462), \
+                        patch("hermecho.openrouter_asr_evaluation._extract_audio", side_effect=extract), \
+                        patch("hermecho.openrouter_asr_evaluation._request_transcription",
+                              side_effect=[response]) as request, \
+                        patch("hermecho.openrouter_asr_evaluation.transcribe_audio", return_value=[{
+                            "text": "a", "start": 0, "end": 1,
+                            "words": [{"word": "a", "start": 0, "end": 1}],
+                        }]):
+                    report = run_evaluation(video, output, 1.0)
+                self.assertEqual(request.call_count, 1)
+                self.assertEqual(report["models"]["microsoft/mai-transcribe-2"]["status"], expected_status)
+                self.assertEqual(report["cost_unknown"], expected_status == "cost_unknown")
+                self.assertTrue((output / "progress.json").is_file())
+                self.assertTrue((output / "comparison.json").is_file())
+
+    def test_failed_chunk_preserves_completed_calls_and_offsets(self) -> None:
+        def response(word, start, end):
+            return {"words": [{"word": word, "start": start, "end": end}],
+                    "cost_usd": 0.01, "elapsed_seconds": 0.1}
+
+        with tempfile.TemporaryDirectory() as root:
+            video = Path(root) / "video.mp4"
+            video.write_bytes(b"video")
+            output = Path(root) / "evaluation"
+
+            def extract(_source, destination, *_args):
+                destination.write_bytes(b"audio")
+
+            calls = [response("probe", 0, 1), response("probe", 0, 1),
+                     response("first", 0, 1), RuntimeError("failed chunk"),
+                     *[response("candidate", 1, 2) for _ in range(8)]]
+            with patch.dict("os.environ", {"OPENROUTER_API_KEY": "test"}), \
+                    patch("hermecho.openrouter_asr_evaluation._ffprobe_duration", return_value=462), \
+                    patch("hermecho.openrouter_asr_evaluation._extract_audio", side_effect=extract), \
+                    patch("hermecho.openrouter_asr_evaluation._request_transcription", side_effect=calls), \
+                    patch("hermecho.openrouter_asr_evaluation.transcribe_audio", return_value=[{
+                        "text": "baseline", "start": 0, "end": 1,
+                        "words": [{"word": "baseline", "start": 0, "end": 1}],
+                    }]):
+                report = run_evaluation(video, output, 10.0)
+            failed = report["models"]["google/gemini-3.5-transcribe"]
+            self.assertEqual(failed["status"], "chunk_failed")
+            self.assertEqual(len(failed["chunks"]), 1)
+            self.assertTrue((output / "google_gemini-3.5-transcribe_chunk_01.json").exists())
+            complete = report["models"]["microsoft/mai-transcribe-2"]
+            self.assertEqual(complete["status"], "complete")
+            self.assertEqual(complete["words"][1]["start"], 60)
+            self.assertEqual(len(list(output.glob("review_*.mp3"))), 5)
+
     def test_rejects_missing_cost_so_budget_cannot_be_guessed(self) -> None:
         body = {"words": [{"word": "안녕", "start": 0, "end": 0.8}]}
         with patch("pathlib.Path.read_bytes", return_value=b"audio"), patch(
@@ -92,6 +180,12 @@ class TestOpenRouterAsrEvaluation(unittest.TestCase):
         self.assertEqual(len(summary["zero_duration_words"]), 1)
         self.assertEqual(len(summary["words_over_3_seconds"]), 1)
         self.assertEqual(len(summary["gaps_at_least_5_seconds"]), 1)
+
+    def test_empty_timing_summary_keeps_unknown_bounds(self) -> None:
+        summary = _timing_summary([])
+        self.assertEqual(summary["timed_words"], 0)
+        self.assertIsNone(summary["first_word_second"])
+        self.assertIsNone(summary["last_word_second"])
 
     def test_cli_reports_partial_evaluation_as_failure(self) -> None:
         report = {"spent_usd": 0.01, "cost_unknown": False, "models": {

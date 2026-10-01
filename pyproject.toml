@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "hermecho"
 version = "0.1.0"
-description = "Local Whisper transcription and OpenRouter translation pipeline for burned-in subtitles."
+description = "Whisper or explicit OpenRouter transcription and translation pipeline for burned-in subtitles."
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [

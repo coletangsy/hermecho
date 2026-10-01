@@ -1,6 +1,7 @@
 """End-to-end video translation pipeline orchestration."""
 from __future__ import annotations
 
+import math
 import os
 import time
 from dataclasses import dataclass
@@ -10,6 +11,7 @@ from typing import Optional
 from tqdm import trange
 
 from .checkpoints import CheckpointStore, fingerprint_data, fingerprint_file
+from .openrouter_transcription import DEFAULT_OPENROUTER_TRANSCRIPTION_MODEL, OpenRouterRequestError
 from .progress import emit_progress
 from .subtitles import (
     delivery_gate_report,
@@ -49,6 +51,7 @@ class PipelineConfig:
     save_source_transcript: bool = False
     model: str = "large"
     transcription_backend: str = "auto"
+    transcription_model: str = DEFAULT_OPENROUTER_TRANSCRIPTION_MODEL
     language: Optional[str] = None
     target_language: str = "Traditional Chinese (Taiwan)"
     translation_model: str = "deepseek/deepseek-v4.1-flash"
@@ -99,6 +102,22 @@ def process_video(config: PipelineConfig) -> None:
             print(f"Error: {error}")
             emit_progress("transcription", "error", error)
             return
+    if transcription_backend == "openrouter":
+        if not os.getenv("OPENROUTER_API_KEY", "").strip():
+            error = "OPENROUTER_API_KEY is required for OpenRouter transcription."
+            print(f"Error: {error}")
+            emit_progress("transcription", "error", error)
+            return
+        if not config.transcription_model.strip():
+            error = "--transcription-model must be a nonempty OpenRouter model slug."
+            print(f"Error: {error}")
+            emit_progress("transcription", "error", error)
+            return
+        if not math.isfinite(config.temperature) or not 0 <= config.temperature <= 1:
+            error = "OpenRouter transcription temperature must be a finite number between 0 and 1."
+            print(f"Error: {error}")
+            emit_progress("transcription", "error", error)
+            return
 
     total_stages = 3 if config.transcribe_only else 4
     if not config.transcribe_only and not config.srt_only:
@@ -130,35 +149,75 @@ def process_video(config: PipelineConfig) -> None:
     try:
         next_stage("Transcribing Audio")
         emit_progress("transcription", "running", "Transcribing audio")
-        transcription_fingerprint = fingerprint_data(
-            {
-                "audio": fingerprint_file(audio_path),
-                "backend": transcription_backend,
-                "language": config.language,
-                "model": config.model,
-                "temperature": config.temperature,
-            }
-        )
+        transcription_inputs = {
+            "audio": fingerprint_file(audio_path),
+            "backend": transcription_backend,
+            "language": config.language,
+            "model": config.transcription_model if transcription_backend == "openrouter" else config.model,
+            "temperature": config.temperature,
+        }
+        if transcription_backend == "openrouter":
+            transcription_inputs["rules"] = "openrouter-word-chunks-v1"
+        transcription_fingerprint = fingerprint_data(transcription_inputs)
         transcription_segments = (
             None
             if config.force
-            else checkpoint_store.load_transcription(transcription_fingerprint)
+            else checkpoint_store.load_transcription(
+                transcription_fingerprint,
+                require_words=transcription_backend == "openrouter",
+            )
         )
         if transcription_segments is None:
-            transcription_segments = transcribe_audio(
-                audio_path,
-                model=config.model,
-                language=config.language,
-                temperature=config.temperature,
-                backend=transcription_backend,
-            )
+            remote_options = {}
+            if transcription_backend == "openrouter":
+                os.makedirs(output_dir, exist_ok=True)
+                remote_options = {
+                    "transcription_model": config.transcription_model,
+                    "checkpoint_path": os.path.join(output_dir, ".openrouter-transcription.json"),
+                    "force": config.force,
+                }
+            try:
+                transcription_segments = transcribe_audio(
+                    audio_path,
+                    model=config.model,
+                    language=config.language,
+                    temperature=config.temperature,
+                    backend=transcription_backend,
+                    **remote_options,
+                )
+            except OpenRouterRequestError as error:
+                print(f"OpenRouter request failed: {error}")
+                print("Re-transcribing the entire audio with local Whisper; remote chunks are not mixed into the Source Transcript.")
+                emit_progress("transcription", "running", "Falling back to local Whisper for the entire audio")
+                transcription_inputs.update(backend="whisper", model=config.model)
+                transcription_backend = "whisper"
+                transcription_inputs.pop("rules", None)
+                transcription_fingerprint = fingerprint_data(transcription_inputs)
+                transcription_segments = (
+                    None if config.force else checkpoint_store.load_transcription(transcription_fingerprint)
+                )
+                if transcription_segments is None:
+                    transcription_segments = transcribe_audio(
+                        audio_path, model=config.model, language=config.language,
+                        temperature=config.temperature, backend="whisper",
+                    )
+            except RuntimeError as error:
+                print(f"Audio transcription blocked: {error}")
+                emit_progress("transcription", "error", str(error))
+                return
             if not transcription_segments:
                 emit_progress("transcription", "error", "Audio transcription failed")
                 return
-            checkpoint_store.save_transcription(
-                transcription_fingerprint,
-                transcription_segments,
-            )
+            try:
+                checkpoint_store.save_transcription(
+                    transcription_fingerprint,
+                    transcription_segments,
+                    require_words=transcription_backend == "openrouter",
+                )
+            except ValueError as error:
+                print(f"Audio transcription checkpoint blocked: {error}")
+                emit_progress("transcription", "error", str(error))
+                return
         else:
             print("Reusing completed transcription checkpoint.")
         emit_progress(

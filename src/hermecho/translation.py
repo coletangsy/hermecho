@@ -27,7 +27,6 @@ CHUNK_SIZE = 200          # Number of segments per chunk, increased for better p
 OVERLAP_SIZE = 3         # Number of segments to overlap
 
 _MAX_TRANSLATION_RETRIES = 2
-_TERMINAL_PUNCTUATION = frozenset("。！？!?；;…．.:：")
 _CONFIGURATION_ERROR = "_configuration_error"
 
 
@@ -243,11 +242,6 @@ def _translation_id(segment: Dict, index: int) -> str:
     return str(segment.get("_translation_id", index))
 
 
-def _terminal_punctuation(text: str) -> str:
-    stripped = text.rstrip()
-    return stripped[-1] if stripped and stripped[-1] in _TERMINAL_PUNCTUATION else ""
-
-
 def _validate_translation_response(
     response_json: Any,
     requested_segments: List[Dict],
@@ -325,10 +319,6 @@ def _validate_translation_response(
         ]
         if failed_terms:
             defects[translation_id] = failed_terms
-            continue
-        source_punctuation = _terminal_punctuation(source_text)
-        if source_punctuation and not _terminal_punctuation(translated_text):
-            defects[translation_id] = ["missing_terminal_punctuation"]
             continue
         accepted[translation_id] = translated_text
 

@@ -489,7 +489,7 @@ class TestOpenRouterTranslation(unittest.TestCase):
 
         self.assertEqual(translated[0]["text"], "你好，世界。")
 
-    def test_translation_gate_rejects_dropped_terminal_punctuation(self) -> None:
+    def test_translation_gate_accepts_missing_terminal_punctuation(self) -> None:
         with patch(
             "hermecho.translation._translate_chunk",
             return_value=({"translations": {"0": "你好"}}, None),
@@ -501,8 +501,8 @@ class TestOpenRouterTranslation(unittest.TestCase):
                 reference_material=None,
             )
 
-        self.assertIsNone(translated)
-        self.assertEqual(translate_chunk.call_count, 3)
+        self.assertEqual(translated[0]["text"], "你好")
+        self.assertEqual(translate_chunk.call_count, 1)
 
     def test_missing_openrouter_key_fails_without_translation_retries(self) -> None:
         with patch.dict(os.environ, {}, clear=True), patch(

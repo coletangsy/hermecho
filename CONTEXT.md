@@ -8,6 +8,10 @@ Hermecho turns source-language speech into time-aligned Traditional Chinese subt
 A recognized source-language word with its time span. It is immutable transcript evidence and is not overwritten by translation or delivery processing.
 _Avoid_: ASR token, timed segment
 
+**Source Transcript**:
+The complete ordered record of recognized source speech for one video. Its Source Words come from one transcription source, even when another source was attempted first.
+_Avoid_: Mixed ASR output, API response
+
 **Source Sentence**:
 A continuous, ordered span of Source Words that expresses one complete source-language meaning. It owns semantic grouping, not subtitle layout.
 _Avoid_: Source segment, source cue
