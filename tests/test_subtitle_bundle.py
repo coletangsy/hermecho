@@ -108,17 +108,38 @@ def test_imported_source_translation_skips_asr_and_keeps_invalid_times(tmp_path)
     video = tmp_path / "clip.mp4"
     video.write_bytes(b"video")
     source = tmp_path / "source.srt"
-    source.write_text("1\n-00:00:00,500 --> 00:00:01,500\nHello\n\n2\n00:00:02,000 --> 00:00:02,000\nZero\n\n")
+    source.write_text(
+        "1\n-00:00:00,500 --> 00:00:01,500\nHello\n\n"
+        "2\n00:00:02,000 --> 00:00:02,000\nZero\n\n"
+        "3\n00:00:03,000 --> 00:00:02,000\nReversed\n\n"
+        "4\n00:00:00,500 --> 00:00:01,000\nOverlap\n\n"
+    )
     with patch("hermecho.pipeline.transcribe_audio") as asr, \
          patch("hermecho.pipeline.extract_audio") as audio, \
          patch("hermecho.pipeline._video_duration_seconds", return_value=3), \
          patch("hermecho.pipeline.is_portrait_video", return_value=False), \
          patch("hermecho.pipeline.load_reference_material", return_value=""), \
          patch("hermecho.pipeline.load_locked_terms", return_value={}), \
+         patch("hermecho.pipeline.burn_subtitles_into_video") as burn, \
          patch("hermecho.pipeline.translate_segments", side_effect=lambda cues, **kwargs: [{**c, "text": "翻譯"} for c in cues]):
-        process_video(PipelineConfig("clip.mp4", input_dir=str(tmp_path), output_dir=str(tmp_path / "out"), source_srt=str(source), srt_only=True))
+        process_video(PipelineConfig("clip.mp4", input_dir=str(tmp_path), output_dir=str(tmp_path / "out"), source_srt=str(source), srt_only=False))
     bundle = json.loads(next((tmp_path / "out").rglob("*_subtitle_bundle.json")).read_text())
-    assert [(c["start_ms"], c["end_ms"]) for c in bundle["translation_cues"]] == [(-500, 1500), (2000, 2000)]
+    expected_times = [(-500, 1500), (2000, 2000), (3000, 2000), (500, 1000)]
+    assert [(c["start_ms"], c["end_ms"]) for c in bundle["source_cues"]] == expected_times
+    assert [(c["start_ms"], c["end_ms"]) for c in bundle["translation_cues"]] == expected_times
+    assert [(item["cue_id"], item["reason"]) for item in bundle["omitted"]] == [
+        ("translation-1", "non_positive_duration"),
+        ("translation-2", "non_positive_duration"),
+    ]
+    from hermecho.subtitle_bundle import read_source_srt
+    translation_srt = next((tmp_path / "out").rglob("*_subtitles.srt"))
+    assert [(c["start"], c["end"]) for c in read_source_srt(str(translation_srt))] == [
+        (-0.5, 1.5), (2.0, 2.0), (3.0, 2.0), (0.5, 1.0)
+    ]
+    burn.assert_called_once()
+    assert [(c["start"], c["end"]) for c in read_source_srt(burn.call_args.args[1])] == [
+        (0.0, 1.5), (0.5, 1.0)
+    ]
     assert all(c["source_words"] == [] for c in bundle["source_cues"])
     assert "-00:00:00,500" in next((tmp_path / "out").rglob("*_subtitles.srt")).read_text()
     asr.assert_not_called()
