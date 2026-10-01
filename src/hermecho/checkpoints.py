@@ -73,6 +73,24 @@ def _is_transcription_segment(segment: Any) -> bool:
     )
 
 
+def _has_complete_source_words(segments: List[Dict]) -> bool:
+    """Require ordered word evidence covering every cached transcript segment."""
+    previous_end = 0.0
+    for segment in segments:
+        words = segment.get("words")
+        if not isinstance(words, list) or not words:
+            return False
+        sentence = {
+            **segment,
+            "source_words": words,
+            "source_word_indices": list(range(len(words))),
+        }
+        if not _is_source_sentence(sentence) or words[0]["start"] < previous_end:
+            return False
+        previous_end = words[-1]["end"]
+    return True
+
+
 def _is_accepted_chunk(record: Any) -> bool:
     return (
         isinstance(record, dict)
@@ -238,13 +256,19 @@ class CheckpointStore:
             if os.path.exists(temporary_path):
                 os.unlink(temporary_path)
 
-    def load_transcription(self, fingerprint: str) -> Optional[List[Dict]]:
+    def load_transcription(
+        self, fingerprint: str, *, require_words: bool = False,
+    ) -> Optional[List[Dict]]:
         record = self._state.get("transcription")
         if not _is_complete_transcription(record) or record["fingerprint"] != fingerprint:
             return None
+        if require_words and not _has_complete_source_words(record["segments"]):
+            return None
         return copy.deepcopy(record["segments"])
 
-    def save_transcription(self, fingerprint: str, segments: List[Dict]) -> None:
+    def save_transcription(
+        self, fingerprint: str, segments: List[Dict], *, require_words: bool = False,
+    ) -> None:
         record = {
             "status": "complete",
             "fingerprint": fingerprint,
@@ -252,6 +276,8 @@ class CheckpointStore:
         }
         if not _is_complete_transcription(record):
             raise ValueError("only completed transcriptions can be checkpointed")
+        if require_words and not _has_complete_source_words(record["segments"]):
+            raise ValueError("complete ordered Source Words are required for this transcription")
         state = {
             "version": CHECKPOINT_VERSION,
             "transcription": record,

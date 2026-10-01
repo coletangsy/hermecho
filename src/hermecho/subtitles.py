@@ -262,58 +262,42 @@ def _is_half_width_word_character(character: str) -> bool:
 def _wrap_delivery_text(text: str, profile: DeliveryProfile) -> str:
     """Wrap text into at most two deterministic lines without splitting words."""
     text = text.replace("\r\n", " ").replace("\r", " ").replace("\n", " ")
-    if visual_cell_count(text) <= profile.repair_line_cells:
+    total_cells = visual_cell_count(text)
+    if total_cells <= profile.repair_line_cells:
         return text
 
-    candidates = []
+    # Score boundaries without retaining a pair of substrings for every cut.
+    # Long repetitive model output otherwise needs quadratic time and memory.
+    left_cells = 0.0
+    best_index: Optional[int] = None
+    best_score: Optional[Tuple[float, ...]] = None
     for index in range(1, len(text)):
+        left_cells += visual_cell_count(text[index - 1])
         if (
             _is_half_width_word_character(text[index - 1])
             and _is_half_width_word_character(text[index])
         ):
             continue
-        left = text[:index]
-        right = text[index:]
-        if not left or not right:
-            continue
-        left_cells = visual_cell_count(left)
-        right_cells = visual_cell_count(right)
+        right_cells = total_cells - left_cells
         if text[index - 1] in DELIVERY_BREAK_PUNCTUATION:
             boundary_kind = 0
         elif text[index - 1].isspace() or text[index].isspace():
             boundary_kind = 1
         else:
             boundary_kind = 2
-        candidates.append((left, right, left_cells, right_cells, boundary_kind, index))
+        max_cells = max(left_cells, right_cells)
+        balance = abs(left_cells - right_cells)
+        if max_cells <= profile.repair_line_cells:
+            score = (0, balance, boundary_kind, index)
+        else:
+            score = (1, max_cells - profile.repair_line_cells, boundary_kind, balance, index)
+        if best_score is None or score < best_score:
+            best_score = score
+            best_index = index
 
-    if not candidates:
+    if best_index is None:
         return text
-
-    fitting = [
-        candidate
-        for candidate in candidates
-        if max(candidate[2], candidate[3]) <= profile.repair_line_cells
-    ]
-    if fitting:
-        left, right, *_ = min(
-            fitting,
-            key=lambda candidate: (
-                abs(candidate[2] - candidate[3]),
-                candidate[4],
-                candidate[5],
-            ),
-        )
-    else:
-        left, right, *_ = min(
-            candidates,
-            key=lambda candidate: (
-                max(candidate[2], candidate[3]) - profile.repair_line_cells,
-                candidate[4],
-                abs(candidate[2] - candidate[3]),
-                candidate[5],
-            ),
-        )
-    return f"{left}\n{right}"
+    return f"{text[:best_index]}\n{text[best_index:]}"
 
 
 def estimated_rendered_line_count(text: str, profile: DeliveryProfile) -> int:

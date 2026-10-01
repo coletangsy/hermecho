@@ -7,6 +7,26 @@ from hermecho.checkpoints import CheckpointStore
 
 
 class TestCheckpointStore(unittest.TestCase):
+    def test_remote_transcription_requires_complete_ordered_words(self) -> None:
+        valid = [{"start": 0.0, "end": 1.0, "text": "hello.",
+                  "words": [{"word": "hello.", "start": 0.0, "end": 1.0}]}]
+        invalid_cases = [
+            [{"start": 0.0, "end": 1.0, "text": "missing"}],
+            [{**valid[0], "text": "unmapped words"}],
+            [valid[0], valid[0]],
+            [{**valid[0], "words": [{"word": "hello.", "start": -1.0, "end": 1.0}]}],
+        ]
+        with tempfile.TemporaryDirectory() as root:
+            store = CheckpointStore(os.path.join(root, "checkpoint.json"))
+            store.save_transcription("remote", valid, require_words=True)
+            self.assertEqual(store.load_transcription("remote", require_words=True), valid)
+            for segments in invalid_cases:
+                with self.subTest(segments=segments):
+                    with self.assertRaises(ValueError):
+                        store.save_transcription("remote", segments, require_words=True)
+                    store.save_transcription("legacy", segments)
+                    self.assertIsNone(store.load_transcription("legacy", require_words=True))
+
     def test_source_sentence_grouping_is_persisted_and_invalidates_translation(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_dir:
             checkpoint_path = os.path.join(temporary_dir, "checkpoint.json")

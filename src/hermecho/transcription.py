@@ -1,5 +1,5 @@
 """
-Local Whisper transcription with an optional MLX backend.
+Whisper transcription with optional MLX and explicit OpenRouter backends.
 """
 import importlib.util
 import math
@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from .asr_comparison import DEFAULT_EVIDENCE_DIR, evidence_allows_mlx
+from .openrouter_transcription import DEFAULT_OPENROUTER_TRANSCRIPTION_MODEL
 
 
 MLX_LARGE_V3_MODEL = "mlx-community/whisper-large-v3-mlx"
@@ -197,10 +198,20 @@ def transcribe_audio(
     language: Optional[str],
     temperature: float = 0.0,
     backend: str = "auto",
+    transcription_model: str = DEFAULT_OPENROUTER_TRANSCRIPTION_MODEL,
+    checkpoint_path: Optional[str] = None,
+    force: bool = False,
 ) -> Optional[List[Dict]]:
     """
-    Transcribes audio using the selected local Whisper backend.
+    Transcribe audio; remote errors propagate so the pipeline can classify them.
     """
+    if backend == "openrouter":
+        from .openrouter_transcription import transcribe_openrouter
+
+        return transcribe_openrouter(
+            audio_path, transcription_model, language, temperature,
+            checkpoint_path=checkpoint_path, force=force,
+        )
     try:
         if not os.path.exists(audio_path):
             print(f"Error: Audio file not found at {audio_path}")
