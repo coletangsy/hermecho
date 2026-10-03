@@ -30,6 +30,7 @@ from .sentence_first import (
     diagnose_source_word_timing,
 )
 from .transcription import (
+    repair_mlx_word_timing,
     resolve_transcription_backend,
     transcribe_audio,
     validate_mlx_backend,
@@ -231,6 +232,22 @@ def _process_video(config: PipelineConfig) -> None:
                 return
         else:
             print("Reusing completed transcription checkpoint.")
+        if transcription_backend == "mlx" and not config.transcribe_only:
+            try:
+                repaired = repair_mlx_word_timing(
+                    audio_path, transcription_segments, config.model, config.language,
+                    config.temperature,
+                    audit_path=os.path.join(output_dir, ".mlx-timing-repairs.json"),
+                )
+                if repaired is not transcription_segments:
+                    checkpoint_store.save_transcription(
+                        transcription_fingerprint, repaired,
+                    )
+                    transcription_segments = repaired
+            except (RuntimeError, ValueError, OSError) as error:
+                print(f"MLX timing recovery blocked: {error}")
+                emit_progress("transcription", "error", str(error))
+                return
         emit_progress(
             "transcription",
             "complete",

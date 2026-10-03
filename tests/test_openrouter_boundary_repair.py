@@ -11,6 +11,31 @@ def words(*items):
     return [{"word": text, "start": start, "end": start + 0.2} for text, start in items]
 
 
+def test_splice_selects_a_matching_anchor_that_does_not_create_overlap():
+    from hermecho.openrouter_transcription import _splice_boundary_words
+
+    left = words(("a", 50), ("b", 51), ("c", 52))
+    right = words(("r", 63), ("s", 64), ("t", 65), ("u", 66))
+    bridge = left + [{"word": "new", "start": 60, "end": 63.025}] + words(
+        ("r", 63.04), ("s", 64.04), ("t", 65.04), ("u", 66.04),
+    )
+    joined = _splice_boundary_words(left, right, bridge, 60)
+    assert all(a["end"] <= b["start"] for a, b in zip(joined, joined[1:]))
+    assert joined == left + bridge[3:5] + right[1:]
+
+
+def test_splice_blocks_when_every_matching_anchor_would_create_overlap():
+    from hermecho.openrouter_transcription import _splice_boundary_words
+
+    left = words(("a", 50), ("b", 51), ("c", 52))
+    right = words(("r", 63), ("s", 64), ("t", 65))
+    bridge = left + [{"word": "new", "start": 60, "end": 63.025}] + words(
+        ("r", 63.04), ("s", 64.04), ("t", 65.04),
+    )
+    with pytest.raises(RuntimeError, match="overlapping word evidence"):
+        _splice_boundary_words(left, right, bridge, 60)
+
+
 @pytest.mark.parametrize("repair_failure", [False, True, "extraction", "response"])
 @pytest.mark.parametrize("missing_edge_word", [False, True])
 def test_conflicting_chunk_edges_use_cached_authoritative_boundary_audio(tmp_path, repair_failure, missing_edge_word):

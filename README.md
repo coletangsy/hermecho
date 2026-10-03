@@ -220,7 +220,29 @@ up to two additional requests with the same backend and model; these bounded
 requests may incur charges. Each rejected response is retained only as request
 metadata plus validation diagnostics in the checkpoint; a successful response
 is retained as validated Source Words. Transport and other request failures do
-not receive automatic paid retries.
+not receive automatic paid retries. When a chunk at least 40 seconds long
+still fails after those retries, the remote path makes one bounded recovery
+attempt using two overlapping windows around the midpoint (10 seconds of
+context on each side). Each child window is validated with up to the same two
+additional requests and cannot start another recovery tree. The two child
+responses must splice through unique three-word/time anchors and pass absolute
+word validation; otherwise the run fails closed without a local fallback.
+Original and child request metadata, charges, validation diagnostics, and
+subwindow provenance are retained once in the chunk checkpoint. A recovered
+chunk is reused on resume after its words validate, so a retry
+does not issue another request.
+
+Local MLX transcription applies the same evidence boundary when adjacent
+words overlap: it uses native `clip_timestamps` to re-transcribe a 24-second
+window starting ten seconds before the disputed boundary (rounded down to a
+whole second), with the same MLX model and the original audio time origin.
+It then splices only at unique three-word/time
+anchors. It bounds a run to eight original overlap repairs, records the
+original segments and fresh windows in `.mlx-timing-repairs.json`, and resets
+downstream grouping and translation after an accepted repair. It never clamps,
+sorts, or dictionary-deduplicates source words; missing or ambiguous anchors
+block delivery. Nonempty original or fresh MLX segments without Source Word
+timestamps also block recovery rather than dropping their text.
 
 For translated runs, `--locked-terms-file` is required and defaults to
 `references/locked_terms.json`. It is a machine-readable JSON source-to-target
