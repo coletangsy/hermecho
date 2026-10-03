@@ -185,6 +185,7 @@ class TestOpenRouterPipeline(unittest.TestCase):
         with tempfile.TemporaryDirectory() as root:
             audio = Path(root) / "audio.mp3"
             audio.write_bytes(b"audio")
+            (Path(root) / "clip.mp4").write_bytes(b"video")
 
             def translate(sentences, **_kwargs):
                 return [{**sentence, "text": "你好。"} for sentence in sentences]
@@ -196,9 +197,10 @@ class TestOpenRouterPipeline(unittest.TestCase):
                     patch("hermecho.pipeline.load_reference_material", return_value=""), \
                     patch("hermecho.pipeline.load_locked_terms", return_value={}), \
                     patch("hermecho.pipeline.is_portrait_video", return_value=False), \
+                    patch("hermecho.pipeline._video_duration_seconds", return_value=1), \
                     patch("hermecho.pipeline.translate_segments", side_effect=translate) as translation, \
                     patch("hermecho.pipeline.generate_srt") as srt:
-                process_video(PipelineConfig("clip.mp4", output_dir=root,
+                process_video(PipelineConfig("clip.mp4", input_dir=root, output_dir=root,
                     transcription_backend="openrouter", srt_only=True, stage_cooldown=0))
             self.assertEqual(translation.call_args.args[0][0]["source_words"],
                              self._segments()[0]["words"])

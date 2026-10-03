@@ -36,6 +36,7 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
         action="store_true",
         help="With the full pipeline, also write a source-language SRT before translation.",
     )
+    parser.add_argument("--source-srt", help="Translate existing source SRT without transcription; preserves every cue and its timing.")
     parser.add_argument("--model", default="large", help="The Whisper model for transcription.")
     parser.add_argument(
         "--transcription-backend",

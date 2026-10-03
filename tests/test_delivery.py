@@ -562,6 +562,15 @@ class TestDeliveryProfiles(unittest.TestCase):
 
 
 class TestDeliveryPipeline(unittest.TestCase):
+    def setUp(self):
+        from hermecho.checkpoints import fingerprint_file
+        media = patch("hermecho.pipeline.fingerprint_file", side_effect=lambda path: "fixture-video" if path.endswith(".mp4") else fingerprint_file(path))
+        media.start()
+        self.addCleanup(media.stop)
+        duration = patch("hermecho.pipeline._video_duration_seconds", return_value=60.0)
+        duration.start()
+        self.addCleanup(duration.stop)
+
     def test_best_effort_delivery_writes_srt_and_report(self) -> None:
         with tempfile.NamedTemporaryFile(suffix=".mp3", delete=False) as audio_file:
             audio_path = audio_file.name
@@ -580,12 +589,6 @@ class TestDeliveryPipeline(unittest.TestCase):
                 patch("hermecho.pipeline.transcribe_audio", return_value=translated), \
                 patch("hermecho.pipeline.build_source_sentences", return_value=translated), \
                 patch("hermecho.pipeline.translate_segments", return_value=translated), \
-                patch(
-                    "hermecho.pipeline.build_delivery_cues",
-                    side_effect=lambda cues, profile, **_kwargs: apply_delivery_profile(
-                        cues, profile
-                    ),
-                ), \
                 patch("hermecho.pipeline.load_reference_material", return_value=""), \
                 patch("hermecho.pipeline.is_portrait_video", return_value=True):
                 process_video(config)
@@ -603,9 +606,9 @@ class TestDeliveryPipeline(unittest.TestCase):
         self.assertEqual(len(srt_paths), 1)
         self.assertEqual(len(report_paths), 1)
         with open(report_paths[0], encoding="utf-8") as report_file:
-            self.assertIn("Repair Limit", report_file.read())
+            self.assertIn('"severity": "Warning"', report_file.read())
 
-    def test_structural_defect_writes_report_but_stops_final_srt(self) -> None:
+    def test_overlap_is_warning_and_preserved_in_final_srt(self) -> None:
         with tempfile.NamedTemporaryFile(suffix=".mp3", delete=False) as audio_file:
             audio_path = audio_file.name
         output_dir = tempfile.mkdtemp()
@@ -626,12 +629,6 @@ class TestDeliveryPipeline(unittest.TestCase):
                 patch("hermecho.pipeline.transcribe_audio", return_value=translated), \
                 patch("hermecho.pipeline.build_source_sentences", return_value=translated), \
                 patch("hermecho.pipeline.translate_segments", return_value=translated), \
-                patch(
-                    "hermecho.pipeline.build_delivery_cues",
-                    side_effect=lambda cues, profile, **_kwargs: apply_delivery_profile(
-                        cues, profile
-                    ),
-                ), \
                 patch("hermecho.pipeline.load_reference_material", return_value=""), \
                 patch("hermecho.pipeline.is_portrait_video", return_value=True):
                 process_video(config)
@@ -644,13 +641,13 @@ class TestDeliveryPipeline(unittest.TestCase):
             for root, _, filenames in os.walk(output_dir)
             for filename in filenames
         ]
-        self.assertFalse(any(path.endswith(".srt") for path in output_files))
+        self.assertTrue(any(path.endswith(".srt") for path in output_files))
         report_paths = [path for path in output_files if path.endswith("_delivery_gate.txt")]
         self.assertEqual(len(report_paths), 1)
         with open(report_paths[0], encoding="utf-8") as report_file:
-            self.assertIn("Structural Defect", report_file.read())
+            self.assertIn("overlap_timing", report_file.read())
 
-    def test_zero_duration_cue_is_omitted_without_stopping_final_srt(self) -> None:
+    def test_zero_duration_cue_is_saved_and_render_omission_reported(self) -> None:
         with tempfile.NamedTemporaryFile(suffix=".mp3", delete=False) as audio_file:
             audio_path = audio_file.name
         output_dir = tempfile.mkdtemp()
@@ -671,12 +668,6 @@ class TestDeliveryPipeline(unittest.TestCase):
                 patch("hermecho.pipeline.transcribe_audio", return_value=translated), \
                 patch("hermecho.pipeline.build_source_sentences", return_value=translated), \
                 patch("hermecho.pipeline.translate_segments", return_value=translated), \
-                patch(
-                    "hermecho.pipeline.build_delivery_cues",
-                    side_effect=lambda cues, profile, **_kwargs: apply_delivery_profile(
-                        cues, profile
-                    ),
-                ), \
                 patch("hermecho.pipeline.load_reference_material", return_value=""), \
                 patch("hermecho.pipeline.is_portrait_video", return_value=True):
                 process_video(config)
@@ -695,15 +686,15 @@ class TestDeliveryPipeline(unittest.TestCase):
         self.assertEqual(len(report_paths), 1)
         with open(srt_paths[0], encoding="utf-8") as srt_file:
             srt = srt_file.read()
-        self.assertNotIn("省略", srt)
+        self.assertIn("省略", srt)
         self.assertIn("保留", srt)
         with open(report_paths[0], encoding="utf-8") as report_file:
             report = report_file.read()
         self.assertIn(
-            "Warning cue 1: non_positive_duration (zero-duration cue was omitted)",
+            "non_positive_duration",
             report,
         )
-        self.assertIn("Structural Defects: 0", report)
+        self.assertIn('"reason": "non_positive_duration"', report)
 
 
 if __name__ == "__main__":

@@ -16,7 +16,7 @@ import subprocess
 import tempfile
 import time
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
@@ -26,19 +26,37 @@ from .checkpoints import (
     fingerprint_data as _fingerprint,
     fingerprint_file,
 )
+from .progress import emit_progress
 
 TRANSCRIPTION_URL = "https://openrouter.ai/api/v1/audio/transcriptions"
 DEFAULT_OPENROUTER_TRANSCRIPTION_MODEL = "microsoft/mai-transcribe-2"
-TRANSCRIPTION_ASSEMBLY_RULES = "openrouter-word-chunks-v2"
+TRANSCRIPTION_ASSEMBLY_RULES = "openrouter-word-chunks-v3"
 CHUNK_SECONDS = 60.0
 OVERLAP_SECONDS = 1.0
 OVERLAP_TIMESTAMP_TOLERANCE = 0.25
+BOUNDARY_CONTEXT_SECONDS = 10.0
 CHECKPOINT_VERSION = 1
 REQUEST_TIMEOUT_SECONDS = 120
+_MAX_WORD_TIMESTAMP_ATTEMPTS = 3
 
 
 class OpenRouterRequestError(RuntimeError):
     """A retryable OpenRouter transport or transient HTTP request failure."""
+
+
+class OpenRouterWordTimestampError(RuntimeError):
+    """A response contains invalid word-timestamp evidence."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        attempts: list[dict[str, Any]] | None = None,
+        diagnostics: list[str] | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.attempts = [dict(attempt) for attempt in attempts or []]
+        self.diagnostics = list(diagnostics or [])
 
 
 def _extract_audio(
@@ -257,15 +275,161 @@ def _response_words(response: dict[str, Any], duration: float) -> tuple[str, lis
     try:
         words = _normalise_words(response, duration)
     except (TypeError, ValueError, KeyError, OverflowError) as error:
-        raise RuntimeError(f"OpenRouter response has invalid word timestamps: {error}") from error
+        raise OpenRouterWordTimestampError(
+            f"OpenRouter response has invalid word timestamps: {error}"
+        ) from error
     if not words:
         raise RuntimeError("OpenRouter response has no word-level timestamps.")
     if any(word["end"] > duration for word in words):
-        raise RuntimeError("OpenRouter response has word timestamps beyond the chunk duration.")
+        raise OpenRouterWordTimestampError(
+            "OpenRouter response has word timestamps beyond the chunk duration."
+        )
     word_text = "".join(word["word"] for word in words)
     if not _content_signature(text) or _content_signature(text) != _content_signature(word_text):
         raise RuntimeError("OpenRouter response text is not fully covered by its word timestamps.")
     return text, words
+
+
+def _metadata_after_timestamp_retry(
+    attempts: list[dict[str, Any]], diagnostics: list[str]
+) -> dict[str, Any]:
+    """Aggregate charged request metadata without retaining response bodies."""
+    if len(attempts) == 1:
+        return attempts[0]
+
+    metadata = dict(attempts[-1])
+    costs = [attempt.get("cost_usd") for attempt in attempts]
+    elapsed = [attempt.get("elapsed_seconds") for attempt in attempts]
+    metadata["cost_usd"] = (
+        sum(float(value) for value in costs)
+        if costs and all(_finite_float(value) and float(value) >= 0 for value in costs)
+        else None
+    )
+    metadata["elapsed_seconds"] = (
+        round(sum(float(value) for value in elapsed), 3)
+        if elapsed and all(_finite_float(value) and float(value) >= 0 for value in elapsed)
+        else None
+    )
+    metadata["attempt_count"] = len(attempts)
+    metadata["retry_diagnostics"] = list(diagnostics)
+    metadata["attempts"] = []
+    for index, attempt in enumerate(attempts):
+        record = dict(attempt)
+        if index < len(diagnostics):
+            record["validation_error"] = diagnostics[index]
+        metadata["attempts"].append(record)
+    return metadata
+
+
+def _record_timestamp_retry_failure(
+    state: dict[str, Any],
+    *,
+    scope: str,
+    identifier: str,
+    error: BaseException,
+    status: str = "exhausted",
+) -> None:
+    """Persist charged retry metadata without retaining invalid response bodies."""
+    attempts = getattr(error, "attempts", None)
+    if not isinstance(attempts, list):
+        attempts = getattr(error, "timestamp_retry_attempts", [])
+    diagnostics = getattr(error, "diagnostics", None)
+    if not isinstance(diagnostics, list):
+        diagnostics = getattr(error, "timestamp_retry_diagnostics", [])
+    history = state.get("retry_history")
+    if history is None:
+        history = []
+        state["retry_history"] = history
+    if not isinstance(history, list):
+        raise RuntimeError("Invalid OpenRouter retry history checkpoint.")
+    history.append(
+        {
+            "status": status,
+            "scope": scope,
+            "identifier": identifier,
+            "attempt_count": len(attempts),
+            "attempts": [dict(attempt) for attempt in attempts if isinstance(attempt, dict)],
+            "diagnostics": list(diagnostics) or [str(error)],
+        }
+    )
+
+
+def _attach_timestamp_retry_context(
+    error: BaseException,
+    attempts: list[dict[str, Any]],
+    diagnostics: list[str],
+) -> None:
+    if attempts:
+        setattr(error, "timestamp_retry_attempts", [dict(attempt) for attempt in attempts])
+        setattr(error, "timestamp_retry_diagnostics", list(diagnostics))
+
+
+def _transcribe_validated_words(
+    audio_path: Path,
+    model: str,
+    language: Optional[str],
+    temperature: float,
+    api_key: str,
+    duration: float,
+    *,
+    label: str,
+    current: int | None = None,
+    total: int | None = None,
+) -> tuple[str, list[dict[str, Any]], dict[str, Any]]:
+    """Request one chunk, retrying only invalid word-timestamp responses."""
+    attempts: list[dict[str, Any]] = []
+    diagnostics: list[str] = []
+    for attempt_number in range(1, _MAX_WORD_TIMESTAMP_ATTEMPTS + 1):
+        if attempt_number > 1:
+            fields: dict[str, Any] = {
+                "detail": {
+                    "kind": "invalid_word_timestamps",
+                    "attempt": attempt_number,
+                    "max_attempts": _MAX_WORD_TIMESTAMP_ATTEMPTS,
+                },
+            }
+            if current is not None:
+                fields["current"] = current
+            if total is not None:
+                fields["total"] = total
+            emit_progress(
+                "transcription",
+                "running",
+                f"Retrying {label} after invalid word timestamps "
+                f"(attempt {attempt_number}/{_MAX_WORD_TIMESTAMP_ATTEMPTS})",
+                **fields,
+            )
+
+        try:
+            body, metadata = _request_transcription(
+                audio_path, model, language, temperature, api_key
+            )
+        except RuntimeError as error:
+            _attach_timestamp_retry_context(error, attempts, diagnostics)
+            raise
+        attempts.append(metadata if isinstance(metadata, dict) else {})
+        try:
+            text, words = _response_words(body, duration)
+        except OpenRouterWordTimestampError as error:
+            diagnostics.append(str(error))
+            if attempt_number < _MAX_WORD_TIMESTAMP_ATTEMPTS:
+                continue
+            diagnostic_text = "; ".join(
+                f"attempt {index}: {message}"
+                for index, message in enumerate(diagnostics, start=1)
+            )
+            raise OpenRouterWordTimestampError(
+                f"{diagnostics[-1]} (after {attempt_number} attempts; "
+                f"diagnostics: {diagnostic_text})",
+                attempts=attempts,
+                diagnostics=diagnostics,
+            ) from error
+        except RuntimeError as error:
+            _attach_timestamp_retry_context(error, attempts, diagnostics)
+            raise
+        return text, words, _metadata_after_timestamp_retry(attempts, diagnostics)
+
+    raise AssertionError("OpenRouter timestamp retry loop did not return or raise")
 
 
 def _validate_cached_words(words: Any, duration: float, text: Any) -> bool:
@@ -387,6 +551,8 @@ def _cached_chunk(
 def _words_for_output(
     chunks: list[tuple[dict[str, float], dict[str, Any]]],
     duration: float,
+    *,
+    boundary_resolver: Callable[..., list[dict[str, Any]]] | None = None,
 ) -> list[dict[str, Any]]:
     """Reconcile shared word evidence before joining adjacent audio chunks."""
     kept: list[dict[str, Any]] = []
@@ -423,6 +589,10 @@ def _words_for_output(
                 or abs(first["end"] - second["end"]) > OVERLAP_TIMESTAMP_TOLERANCE
                 for first, second in zip(left, right)
             ):
+                if boundary_resolver is not None:
+                    kept = boundary_resolver(spec["core_start"], kept, absolute_words)
+                    previous_spec = spec
+                    continue
                 raise RuntimeError(
                     f"OpenRouter overlapping transcripts disagree near {spec['core_start']:g}s; "
                     "cannot reconcile complete Source Word evidence."
@@ -435,6 +605,53 @@ def _words_for_output(
 
     _validate_absolute_words(kept, duration)
     return kept
+
+
+def _splice_boundary_words(
+    left: list[dict[str, Any]],
+    right: list[dict[str, Any]],
+    bridge: list[dict[str, Any]],
+    boundary: float,
+) -> list[dict[str, Any]]:
+    """Join at matching three-word/time anchors outside the disputed overlap.
+
+    The middle comes from one new audio response. No conflicting words or
+    timestamps are guessed, interpolated, or copied into that response.
+    """
+    def matches(first, second):
+        return bool(_content_signature(first["word"])) and (
+            _content_signature(first["word"]).casefold()
+            == _content_signature(second["word"]).casefold()
+            and abs(first["start"] - second["start"]) <= OVERLAP_TIMESTAMP_TOLERANCE
+            and abs(first["end"] - second["end"]) <= OVERLAP_TIMESTAMP_TOLERANCE
+        )
+
+    def anchors(original, side):
+        found = []
+        for i in range(len(original) - 2):
+            if side == "left" and original[i + 2]["end"] > boundary - OVERLAP_SECONDS:
+                continue
+            if side == "right" and original[i]["start"] < boundary + OVERLAP_SECONDS:
+                continue
+            for j in range(len(bridge) - 2):
+                if all(matches(original[i + k], bridge[j + k]) for k in range(3)):
+                    found.append((i, j))
+        return found
+
+    left_anchors, right_anchors = anchors(left, "left"), anchors(right, "right")
+    if not left_anchors or not right_anchors:
+        raise RuntimeError(f"OpenRouter boundary near {boundary:g}s has no matching word/time anchors.")
+    li, lb = left_anchors[-1]
+    ri, rb = right_anchors[0]
+    if (sum(i == li or j == lb for i, j in left_anchors) != 1
+            or sum(i == ri or j == rb for i, j in right_anchors) != 1):
+        raise RuntimeError(f"OpenRouter boundary near {boundary:g}s has ambiguous anchors.")
+    if lb + 3 > rb:
+        raise RuntimeError(f"OpenRouter boundary near {boundary:g}s has inconsistent anchors.")
+    joined = left[:li + 3] + bridge[lb + 3:rb] + right[ri:]
+    if any(a["start"] > b["start"] or a["end"] > b["end"] for a, b in zip(joined, joined[1:])):
+        raise RuntimeError(f"OpenRouter boundary near {boundary:g}s has unordered word evidence.")
+    return joined
 
 
 def _segments_from_words(words: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -510,19 +727,119 @@ def transcribe_openrouter(
         if checkpoint is None or force
         else _load_checkpoint(checkpoint, config_fingerprint, config, float(duration))
     )
+    # Acquisition evidence remains reusable when only assembly policy changes.
+    # Accepted pipeline transcripts separately fingerprint the assembly rules.
+    state["assembly_policy"] = {
+        "rules": TRANSCRIPTION_ASSEMBLY_RULES,
+        "timestamp_tolerance": OVERLAP_TIMESTAMP_TOLERANCE,
+        "boundary_context_seconds": BOUNDARY_CONTEXT_SECONDS,
+    }
+    state["assembly_fingerprint"] = _fingerprint(state["assembly_policy"])
+    state["status"] = "partial"
+    if checkpoint is not None:
+        _save_checkpoint(checkpoint, state)
 
     specs = _chunk_specs(float(duration))
     completed: list[tuple[dict[str, float], dict[str, Any]]] = []
+    used_repairs: list[tuple[dict[str, float], dict[str, Any]]] = []
+
+    def repair_boundary(boundary, left, right):
+        start = max(0.0, boundary - BOUNDARY_CONTEXT_SECONDS)
+        end = min(float(duration), boundary + BOUNDARY_CONTEXT_SECONDS)
+        if (sum(start <= word["start"] and word["end"] <= boundary - OVERLAP_SECONDS
+                for word in left) < 3
+                or sum(boundary + OVERLAP_SECONDS <= word["start"] and word["end"] <= end
+                       for word in right) < 3):
+            raise RuntimeError(
+                f"OpenRouter overlapping transcripts disagree near {boundary:g}s; "
+                "insufficient word/time anchors for boundary repair."
+            )
+        repair_fingerprint = _fingerprint({
+            "config": config_fingerprint, "boundary": boundary, "start": start, "end": end,
+            "assembly": state["assembly_fingerprint"],
+        })
+        repairs = state.setdefault("boundary_repairs", {})
+        if not isinstance(repairs, dict):
+            raise RuntimeError("Invalid OpenRouter boundary checkpoint.")
+        record = repairs.get(str(boundary))
+        emit_progress(
+            "transcription",
+            "running",
+            f"Reconciling audio boundary near {boundary:g}s",
+            current=len(completed),
+            total=len(specs),
+        )
+        if not (isinstance(record, dict) and record.get("fingerprint") == repair_fingerprint
+                and record.get("start") == start and record.get("end") == end
+                and _validate_cached_words(record.get("words"), end - start, record.get("text"))):
+            try:
+                with tempfile.TemporaryDirectory(prefix="hermecho-openrouter-boundary-") as temporary_dir:
+                    audio = Path(temporary_dir) / "boundary.mp3"
+                    _extract_audio(source_path, audio, start, end - start)
+                    text, words, metadata = _transcribe_validated_words(
+                        audio,
+                        model,
+                        language,
+                        float(temperature),
+                        api_key,
+                        end - start,
+                        label=f"boundary audio near {boundary:g}s",
+                        current=len(completed),
+                        total=len(specs),
+                    )
+            except OpenRouterWordTimestampError as error:
+                _record_timestamp_retry_failure(
+                    state,
+                    scope="boundary",
+                    identifier=str(boundary),
+                    error=error,
+                )
+                if checkpoint is not None:
+                    _save_checkpoint(checkpoint, state)
+                # A repair must never change the selected transcription source.
+                raise RuntimeError(f"OpenRouter boundary repair near {boundary:g}s failed: {error}") from error
+            except RuntimeError as error:
+                if getattr(error, "timestamp_retry_attempts", None):
+                    _record_timestamp_retry_failure(
+                        state,
+                        scope="boundary",
+                        identifier=str(boundary),
+                        error=error,
+                        status="interrupted",
+                    )
+                    if checkpoint is not None:
+                        _save_checkpoint(checkpoint, state)
+                # A repair must never change the selected transcription source.
+                raise RuntimeError(f"OpenRouter boundary repair near {boundary:g}s failed: {error}") from error
+            except (OSError, ValueError, TypeError, KeyError, OverflowError,
+                    subprocess.CalledProcessError) as error:
+                # A repair must never change the selected transcription source.
+                raise RuntimeError(f"OpenRouter boundary repair near {boundary:g}s failed: {error}") from error
+            record = {"fingerprint": repair_fingerprint, "start": start, "end": end,
+                      "text": text, "words": words, "metadata": metadata}
+            repairs[str(boundary)] = record
+            if checkpoint is not None:
+                _save_checkpoint(checkpoint, state)
+        bridge = [{"word": word["word"], "start": word["start"] + start,
+                   "end": word["end"] + start} for word in record["words"]]
+        result = _splice_boundary_words(left, right, bridge, boundary)
+        used_repairs.append(({}, record))
+        return result
+
     with tempfile.TemporaryDirectory(prefix="hermecho-openrouter-") as temporary_dir:
         temporary_root = Path(temporary_dir)
         for spec in specs:
             cached = None if force else _cached_chunk(state, spec, config_fingerprint)
             if cached is not None:
                 completed.append((spec, cached))
+                emit_progress("transcription", "running", "Reusing transcription chunk",
+                              current=len(completed), total=len(specs))
                 continue
 
             chunk_path = temporary_root / f"chunk-{int(spec['index']):04d}.mp3"
             chunk_duration = spec["end"] - spec["start"]
+            emit_progress("transcription", "running", "Transcribing audio chunk",
+                          current=len(completed) + 1, total=len(specs))
             try:
                 _extract_audio(source_path, chunk_path, spec["start"], chunk_duration)
             except (OSError, ValueError, TypeError, subprocess.CalledProcessError) as error:
@@ -530,10 +847,39 @@ def transcribe_openrouter(
                     f"Unable to extract OpenRouter transcription chunk {int(spec['index'])}."
                 ) from error
             try:
-                body, metadata = _request_transcription(
-                    chunk_path, model, language, float(temperature), api_key
+                text, words, metadata = _transcribe_validated_words(
+                    chunk_path,
+                    model,
+                    language,
+                    float(temperature),
+                    api_key,
+                    chunk_duration,
+                    label=f"audio chunk {int(spec['index'])}",
+                    current=len(completed) + 1,
+                    total=len(specs),
                 )
-                text, words = _response_words(body, chunk_duration)
+            except OpenRouterWordTimestampError as error:
+                _record_timestamp_retry_failure(
+                    state,
+                    scope="chunk",
+                    identifier=str(int(spec["index"])),
+                    error=error,
+                )
+                if checkpoint is not None:
+                    _save_checkpoint(checkpoint, state)
+                raise
+            except RuntimeError as error:
+                if getattr(error, "timestamp_retry_attempts", None):
+                    _record_timestamp_retry_failure(
+                        state,
+                        scope="chunk",
+                        identifier=str(int(spec["index"])),
+                        error=error,
+                        status="interrupted",
+                    )
+                    if checkpoint is not None:
+                        _save_checkpoint(checkpoint, state)
+                raise
             except (OSError, TypeError, ValueError, KeyError, OverflowError) as error:
                 raise RuntimeError(
                     f"OpenRouter transcription chunk {int(spec['index'])} returned invalid data."
@@ -556,24 +902,39 @@ def transcribe_openrouter(
                 _save_checkpoint(checkpoint, state)
             completed.append((spec, record))
 
-    words = _words_for_output(completed, float(duration))
+    words = _words_for_output(completed, float(duration), boundary_resolver=repair_boundary)
     segments = _segments_from_words(words)
     state["status"] = "complete"
-    state["metadata"] = _aggregate_metadata(completed)
+    state["metadata"] = _aggregate_metadata(
+        [*completed, *used_repairs], retry_history=state.get("retry_history")
+    )
     if checkpoint is not None:
         _save_checkpoint(checkpoint, state)
     return segments
 
 
 def _aggregate_metadata(
-    chunks: list[tuple[dict[str, float], dict[str, Any]]]
+    chunks: list[tuple[dict[str, float], dict[str, Any]]],
+    *,
+    retry_history: Any = None,
 ) -> dict[str, Any]:
     metadata = [
         record["metadata"] if isinstance(record.get("metadata"), dict) else {}
         for _spec, record in chunks
     ]
-    costs = [item.get("cost_usd") for item in metadata]
-    elapsed = [item.get("elapsed_seconds") for item in metadata]
+    charged_history: list[dict[str, Any]] = []
+    if isinstance(retry_history, list):
+        for history in retry_history:
+            if not isinstance(history, dict):
+                continue
+            attempts = history.get("attempts")
+            if isinstance(attempts, list):
+                charged_history.extend(
+                    dict(attempt) for attempt in attempts if isinstance(attempt, dict)
+                )
+    all_metadata = [*metadata, *charged_history]
+    costs = [item.get("cost_usd") for item in all_metadata]
+    elapsed = [item.get("elapsed_seconds") for item in all_metadata]
     cost = (
         sum(float(value) for value in costs)
         if costs and all(_finite_float(value) and value >= 0 for value in costs)
@@ -586,8 +947,8 @@ def _aggregate_metadata(
     )
     return {
         "cost_usd": cost,
-        "model": [item.get("model") for item in metadata],
-        "provider": [item.get("provider") for item in metadata],
-        "generation_id": [item.get("generation_id") for item in metadata],
+        "model": [item.get("model") for item in all_metadata],
+        "provider": [item.get("provider") for item in all_metadata],
+        "generation_id": [item.get("generation_id") for item in all_metadata],
         "elapsed_seconds": elapsed_seconds,
     }

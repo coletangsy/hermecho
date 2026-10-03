@@ -8,14 +8,15 @@ Hermecho translates videos with Korean audio into Traditional Chinese (Taiwan) s
 - Optional OpenRouter word-timestamp transcription with resumable audio chunks.
 - OpenRouter translation with reference-file context for names and terms.
 - Translation Gate rejects incomplete model responses and enforces JSON Locked Terms.
-- Source Sentence grouping and Delivery Profile guardrails for subtitle timing and layout.
+- Deterministic Source Sentence grouping with complete same-time translations.
 - SRT-only, transcribe-only, and full burn-in modes.
 - Subtitle styling controls for font, size, background box, margins, and ASS alignment.
 - `ffmpeg` subtitle-filter detection before burn-in.
-- Deterministic portrait and landscape Delivery Profiles measure subtitle width in Visual Cells and wrap to at most two lines. Every translated run writes a Delivery Gate report; presentation limits use Best-effort Delivery, zero-duration cues are omitted with a warning, and other structural timing defects block final output.
-- Sentence-first delivery preserves Source Word timing and translates complete Source Sentences before shaping Delivery Cues.
-- Short or apparently incomplete Source Sentence boundaries are reviewed in one batched request; clear boundaries stay deterministic and accepted grouping decisions resume from the checkpoint.
-- Delivery Cues aim for one Rendered Line and 1–7 seconds. Alignment candidates are validated for exact text coverage, continuous Source Word ranges, Visual Cells, reading speed, duration, and cue count; unresolved presentation limits remain visible in the report while complete text is retained.
+- Source and translated SRT preserve every cue and identical millisecond timing, including zero-duration cues.
+- Source Boundary Review, Alignment, and Fit Repair are absent from production generation. LLM requests are limited to translation and its necessary response retries.
+- Every translated run writes a versioned `*_subtitle_bundle.json` with explicit source references, grouping/timing policy, source fingerprint, diagnostics, and render omissions.
+- Rendering uses a separate visible-interval SRT. Zero/reversed/outside-video cues are omitted with reasons; overlaps and long translations remain. Saved SRT is never shortened or retimed.
+- `--source-srt captions.srt` translates explicitly imported source subtitles without ASR or invented Source Words.
 
 The current pipeline does not include multimodal transcription, transcription prompts, keyword extraction, or timing-review stages.
 
@@ -188,12 +189,24 @@ Remote audio is converted to mono 16 kHz MP3 and sent in 60-second core ranges
 with one second of context on each side. Adjacent overlapping word sequences
 must agree in content and order, with timestamp drift of at most 0.25 seconds.
 The earlier chunk's original words and timestamps are retained once, so drift
-across a core boundary cannot duplicate or drop a matched word. Conflicting
-overlap evidence blocks transcription without local fallback. Timestamps are
-offset back to the full audio. Completed chunks and
+across a core boundary cannot duplicate or drop a matched word. If overlap
+evidence conflicts, the production pipeline requests a 20-second audio window
+around that boundary using the same remote model. Three consecutive words with
+matching text and timestamps on each side must anchor this new evidence outside
+the disputed overlap. Only the span between those anchors is replaced, keeping
+its original returned word timestamps. Missing anchors, invalid timing, or a
+failed repair request block transcription without local fallback. Repairs incur
+an additional transcription request per conflicting boundary and are cached
+alongside the original chunks; retries reuse both. ASR Evaluation retains its
+strict comparison policy and does not request repairs. Chunk and repair progress
+is emitted through `HERMECHO_PROGRESS`. Timestamps are offset back to the full
+audio. Completed chunks, boundary evidence, and
 reported cost, provider, model, generation ID, and request latency are retained
 in `output/<video>/.openrouter-transcription.json`; unavailable metadata stays
-unknown. Repeating the same command resumes matching chunks. Audio, model,
+unknown. The checkpoint records raw acquisition and assembly fingerprints
+separately: assembly-only changes reuse matching raw chunks while rebuilding
+the joined transcript under the current policy. Repeating the same command
+resumes matching chunks. Audio, model,
 language, or temperature changes invalidate them; `--force` recomputes them.
 
 Network failures, timeouts, HTTP 408/429, and server errors trigger local Whisper
@@ -201,26 +214,30 @@ transcription of the entire audio. Successful remote chunks remain available for
 a later retry, but the delivered Source Transcript contains only Whisper words.
 The local result is cached with the local backend fingerprint; another explicit
 OpenRouter run retries the remote path. Missing credentials, invalid parameters,
-authentication errors, malformed responses, and missing or invalid word timing
-block transcription without fallback. There are no automatic paid API retries.
+authentication errors, malformed responses, and missing word timing block
+transcription without fallback. Invalid word-timestamp responses receive
+up to two additional requests with the same backend and model; these bounded
+requests may incur charges. Each rejected response is retained only as request
+metadata plus validation diagnostics in the checkpoint; a successful response
+is retained as validated Source Words. Transport and other request failures do
+not receive automatic paid retries.
 
 For translated runs, `--locked-terms-file` is required and defaults to
 `references/locked_terms.json`. It is a machine-readable JSON source-to-target
 mapping enforced by the Translation Gate; a missing or invalid mapping blocks
 translation and final SRT/MP4 delivery. `--reference_file` remains separate
 Markdown prompt context. The Translation Gate accepts nonempty translations
-even when they omit source sentence terminal punctuation. Delivery preserves
-whatever punctuation the accepted translation contains; portrait processing
-may wrap or split cues but does not remove it. Delivery Cues end at their last mapped
-Source Word timestamp; the pipeline does not extend them into the following gap.
-Full translated runs review only suspicious short or incomplete Source Sentence
-boundaries before translation. The review can merge adjacent spans after strict
-Source Word text and coverage validation; an invalid response falls back to the
-deterministic grouping and records its time range. `--transcribe-only` keeps its
-existing source SRT path. Alignment can split a Translation Sentence into
-sequential Delivery Cues, then merges short adjacent candidates when the merged
-cue still meets the profile. A Delivery Gate report also records suspiciously
-long Source Word spans without changing their timestamps.
+even when they omit source sentence terminal punctuation. Every accepted translation
+is attached to its original Source Sentence without splitting, merging, wrapping,
+or timing adjustment. Quality findings are warnings. Missing translations or
+unusable Source Word evidence remain operation failures.
+
+`--source-srt` keeps the imported segmentation and timing; imported cues do not
+claim Source Word evidence. `--transcribe-only` retains its separate transcript
+workflow. The generation grouping policy is `source-sentence-rules-v3`; old
+reviewed grouping is not reused under this policy, but compatible ASR is reused.
+Translation checkpoints depend on the source grouping and translation inputs,
+so a pure render/style change reuses accepted translations.
 
 ## Options
 
@@ -239,6 +256,7 @@ Run `hermecho --help` for the full list.
 | `--locked-terms-file` | Required JSON source-to-target mapping for translated runs; defaults to `references/locked_terms.json`. Missing or invalid mappings block translation and final SRT/MP4 delivery. |
 | `--temperature` | Transcription sampling temperature, default `0.0`. |
 | `--transcribe-only` | Write source-language SRT and stop. |
+| `--source-srt` | Translate a source SRT without ASR, preserving all cues and times. |
 | `--srt-only` | Write translated SRT and skip video burn-in. |
 | `--save-source-transcript` | Also write source-language SRT during a translated run. |
 | `--font_name`, `--font_size`, `--outline_width`, `--box_background` | Burn-in subtitle styling. Font defaults to `Heiti TC`. |
@@ -247,11 +265,11 @@ Run `hermecho --help` for the full list.
 | `--stage-cooldown` | Delay between stages, default `60`; use `0` to disable. |
 | `--force` | Recompute all stages instead of reusing completed checkpoints. |
 
-Outputs are written under `output/<video_basename>/` with a `YYYYMMDD_HHMMSS` timestamp. Each video also keeps one versioned, atomic `.hermecho-checkpoint.json`: matching completed transcription, accepted Source Sentence grouping, and Translation-Gate-approved chunks resume automatically; changing the grouping fingerprint invalidates downstream translation chunks; `--force` bypasses it. MLX transcription skips segments with non-finite or reversed segment or word timestamps before checkpointing and reports the exclusions as a warning. Translated runs also write a matching `*_delivery_gate.txt` report with cue and Rendered Line counts, short and long cue counts, presentation warnings, Repair Limits, Structural Defects, Source Sentence review findings, and suspicious Source Word timing ranges.
+Outputs are written under `output/<video_basename>/` with a `YYYYMMDD_HHMMSS` timestamp. Each video also keeps one versioned, atomic `.hermecho-checkpoint.json`: matching completed transcription, accepted Source Sentence grouping, and Translation-Gate-approved chunks resume automatically; changing the grouping fingerprint invalidates downstream translation chunks; `--force` bypasses it. MLX transcription skips segments with non-finite or reversed segment or word timestamps before checkpointing and reports the exclusions as a warning. Translated runs also write a matching `*_subtitle_bundle.json` and `*_delivery_gate.txt` report. Bundles separate complete saved cues from render omissions and record source fingerprints and policy versions. The `source_timing_diagnostics` field preserves suspicious Source Word timing as warnings without rewriting words or timestamps; the delivery report includes those warnings.
 
 ## Hermecho Cloud rollout
 
-Before deploying Hermecho Cloud changes that accept portrait jobs, install the compatible Hermecho release on the processor Mac. The pipeline owns the orientation-specific Delivery Profile used by both SRT and burned-in MP4 output.
+Before deploying Hermecho Cloud changes that accept portrait jobs, install the compatible Hermecho release on the processor Mac. The pipeline preserves source timing in saved SRT; orientation-specific quality diagnostics and render plans do not rewrite saved captions.
 
 ## Development
 

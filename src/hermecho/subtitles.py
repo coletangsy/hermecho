@@ -789,9 +789,16 @@ def generate_srt(
             end_time = seg["end"]
             text = seg["text"]
 
-            # SRT time format: HH:MM:SS,ms
-            start_srt = f"{int(start_time // 3600):02}:{int((start_time % 3600) // 60):02}:{int(start_time % 60):02},{int((start_time % 1) * 1000):03}"
-            end_srt = f"{int(end_time // 3600):02}:{int((end_time % 3600) // 60):02}:{int(end_time % 60):02},{int((end_time % 1) * 1000):03}"
+            # Round once to integer milliseconds; bundle and both tracks share this policy.
+            def timestamp(seconds):
+                total = round(float(seconds) * 1000)
+                sign = "-" if total < 0 else ""
+                hours, remainder = divmod(abs(total), 3600000)
+                minutes, remainder = divmod(remainder, 60000)
+                whole, milliseconds = divmod(remainder, 1000)
+                return f"{sign}{hours:02}:{minutes:02}:{whole:02},{milliseconds:03}"
+            start_srt = timestamp(start_time)
+            end_srt = timestamp(end_time)
 
             f.write(f"{i + 1}\n")
             f.write(f"{start_srt} --> {end_srt}\n")

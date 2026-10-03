@@ -1,12 +1,14 @@
 """End-to-end video translation pipeline orchestration."""
 from __future__ import annotations
 
+import json
 import math
 import os
 import time
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Optional
+from uuid import uuid4
+from typing import Any, Optional
 
 from tqdm import trange
 
@@ -18,17 +20,14 @@ from .openrouter_transcription import (
 )
 from .progress import emit_progress
 from .subtitles import (
-    delivery_gate_report,
     delivery_profile_for_orientation,
     generate_srt,
     split_long_segments,
 )
 from .sentence_first import (
     SentenceFirstError,
-    build_delivery_cues,
     build_source_sentences,
     diagnose_source_word_timing,
-    review_ambiguous_source_boundaries,
 )
 from .transcription import (
     resolve_transcription_backend,
@@ -36,15 +35,13 @@ from .transcription import (
     validate_mlx_backend,
 )
 from .translation import (
-    align_translation_sentence,
-    fit_repair_translation_sentence,
-    review_source_sentence_boundaries,
-    source_boundary_prompt_fingerprint,
     translate_segments,
+    track_translation_requests,
     translation_prompt_fingerprint,
 )
 from .utils import _print_segments, load_locked_terms, load_reference_material
-from .video_processing import burn_subtitles_into_video, extract_audio, is_portrait_video
+from .video_processing import burn_subtitles_into_video, extract_audio, is_portrait_video, _video_duration_seconds
+from .subtitle_bundle import GROUPING_POLICY, preserve_source_translation, read_source_srt, render_plan, write_bundle
 
 
 @dataclass
@@ -74,6 +71,7 @@ class PipelineConfig:
     alignment: int = 2
     stage_cooldown: int = 60
     force: bool = False
+    source_srt: Optional[str] = None
 
 
 def _stage_banner(current: int, total: int, label: str) -> None:
@@ -93,7 +91,16 @@ def _stage_cooldown(seconds: int) -> None:
 
 
 def process_video(config: PipelineConfig) -> None:
+    """Run one generation with isolated application request accounting."""
+    with track_translation_requests():
+        _process_video(config)
+
+
+def _process_video(config: PipelineConfig) -> None:
     """Run the configured Hermecho video translation pipeline."""
+    if config.source_srt:
+        _process_source_srt(config)
+        return
     comparison_evidence_dir = os.path.join(config.output_dir, "asr-comparison")
     transcription_backend = resolve_transcription_backend(
         config.transcription_backend,
@@ -238,6 +245,11 @@ def process_video(config: PipelineConfig) -> None:
             transcription_segments,
         )
 
+        transcript_segments = []
+        source_sentences = []
+        source_timing_diagnostics = []
+        locked_terms = {}
+        reference_material = None
         if config.transcribe_only:
             transcript_segments = split_long_segments(transcription_segments)
             transcript_segments = [
@@ -270,41 +282,26 @@ def process_video(config: PipelineConfig) -> None:
             source_grouping_fingerprint = fingerprint_data(
                 {
                     "transcription": transcription_fingerprint,
-                    "translation_model": config.translation_model,
-                    "prompt": source_boundary_prompt_fingerprint(),
-                    "grouping_rules": "source-sentence-v2",
+                    "grouping_rules": GROUPING_POLICY,
                 }
             )
-            source_grouping_diagnostics = []
             source_sentences = (
                 None
                 if config.force
                 else checkpoint_store.load_source_sentences(source_grouping_fingerprint)
             )
             if source_sentences is None:
-                review_result = review_ambiguous_source_boundaries(
-                    deterministic_source_sentences,
-                    review=lambda candidates: review_source_sentence_boundaries(
-                        candidates,
-                        translation_model=config.translation_model,
-                    ),
-                )
-                source_sentences = review_result.sentences
-                source_grouping_diagnostics = review_result.diagnostics
-                if review_result.cacheable:
-                    try:
-                        checkpoint_store.save_source_sentences(
-                            source_grouping_fingerprint,
-                            source_sentences,
-                        )
-                    except ValueError as error:
-                        print(f"Warning: Source Sentence checkpoint skipped: {error}")
+                source_sentences = deterministic_source_sentences
+                try:
+                    checkpoint_store.save_source_sentences(source_grouping_fingerprint, source_sentences)
+                except ValueError as error:
+                    print(f"Warning: Source Sentence checkpoint skipped: {error}")
             else:
                 print("Reusing completed Source Sentence grouping checkpoint.")
             _print_segments("Source Sentences", source_sentences)
 
         os.makedirs(output_dir, exist_ok=True)
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S") + "_" + uuid4().hex[:12]
 
         if config.transcribe_only:
             next_stage("Writing Transcript SRT")
@@ -359,7 +356,9 @@ def process_video(config: PipelineConfig) -> None:
         )
         checkpoint_store.discard_stale_translation(translation_fingerprint)
 
-        def load_accepted_chunk(chunk_index: int, chunk: list[dict]) -> Optional[dict]:
+        def load_accepted_chunk(
+            chunk_index: int, chunk: list[dict[str, Any]]
+        ) -> Optional[dict[str, str]]:
             if config.force:
                 return None
             expected_ids = [
@@ -375,7 +374,7 @@ def process_video(config: PipelineConfig) -> None:
 
         def save_accepted_chunk(
             chunk_index: int,
-            chunk: list[dict],
+            chunk: list[dict[str, Any]],
             translations: dict[str, str],
         ) -> None:
             checkpoint_store.save_accepted_translation_chunk(
@@ -393,6 +392,7 @@ def process_video(config: PipelineConfig) -> None:
             locked_terms=locked_terms,
             accepted_chunk_loader=load_accepted_chunk,
             accepted_chunk_saver=save_accepted_chunk,
+            preserve_markers=True,
         )
 
         if translated_sentences is not None:
@@ -408,66 +408,18 @@ def process_video(config: PipelineConfig) -> None:
             _print_segments(translation_label, translated_sentences)
 
             profile = delivery_profile_for_orientation(is_portrait)
-            delivery_result = build_delivery_cues(
-                translated_sentences,
-                profile,
-                fit_repair=lambda sentence, delivery_profile: fit_repair_translation_sentence(
-                    sentence,
-                    target_language=config.target_language,
-                    translation_model=config.translation_model,
-                    reference_material=reference_material,
-                    locked_terms=locked_terms,
-                    profile=delivery_profile,
-                ),
-                align=lambda sentence: align_translation_sentence(
-                    sentence,
-                    target_language=config.target_language,
-                    translation_model=config.translation_model,
-                ),
-            )
-            emit_progress(
-                "delivery_gate",
-                "running",
-                f"Applying {profile.name} Delivery Profile",
-            )
-            report_path = os.path.join(
-                output_dir,
-                f"{video_name}_{timestamp}_delivery_gate.txt",
-            )
-            report = delivery_gate_report(
-                delivery_result,
-                profile,
-                source_grouping_diagnostics=source_grouping_diagnostics,
-                source_timing_diagnostics=source_timing_diagnostics,
-            )
+            delivery_cues = preserve_source_translation(source_sentences, translated_sentences)
+            duration = _video_duration_seconds(video_path)
+            bundle_path = os.path.join(output_dir, f"{video_name}_{timestamp}_subtitle_bundle.json")
+            bundle = write_bundle(bundle_path, source_sentences, delivery_cues,
+                video_fingerprint=fingerprint_file(video_path), source_language=config.language,
+                target_language=config.target_language, profile=profile, duration=duration,
+                source_timing_diagnostics=source_timing_diagnostics)
+            report_path = os.path.join(output_dir, f"{video_name}_{timestamp}_delivery_gate.txt")
             with open(report_path, "w", encoding="utf-8") as report_file:
-                report_file.write(report + "\n")
-            print(report)
-            if delivery_result.blocked:
-                print("Delivery Gate blocked final delivery; see report for details.")
-                emit_progress(
-                    "delivery_gate",
-                    "error",
-                    "Delivery Gate found Structural Defects",
-                    detail=report_path,
-                )
-                return
-            delivery_cues = delivery_result.cues
-            emit_progress(
-                "delivery_gate",
-                "complete",
-                "Delivery Gate completed",
-                detail=report_path,
-            )
-            emit_progress(
-                "subtitle_timing_adjustment",
-                "complete",
-                "Subtitle timing adjusted",
-                current=len(delivery_cues),
-                total=len(translated_sentences),
-                pct=100,
-            )
-            _print_segments("Adjusted Subtitles", delivery_cues)
+                report_file.write("Subtitle timing preserved; quality findings are warnings.\n")
+                report_file.write(json.dumps({"diagnostics": bundle["diagnostics"], "source_timing_diagnostics": bundle["source_timing_diagnostics"], "omitted": bundle["omitted"]}, ensure_ascii=False, indent=2))
+            emit_progress("delivery_gate", "complete", "Source subtitle timing preserved", detail=report_path)
 
             next_stage("Writing Subtitle SRT")
             srt_path = os.path.join(output_dir, f"{video_name}_{timestamp}_subtitles.srt")
@@ -490,9 +442,12 @@ def process_video(config: PipelineConfig) -> None:
                     output_dir,
                     f"{video_name}_{timestamp}_translated.mp4",
                 )
+                render_srt_path = os.path.join(output_dir, f"{video_name}_{timestamp}_render.srt")
+                visible, _ = render_plan(delivery_cues, duration)
+                generate_srt(visible, render_srt_path)
                 burn_subtitles_into_video(
                     video_path,
-                    os.path.abspath(srt_path),
+                    os.path.abspath(render_srt_path),
                     os.path.abspath(output_video_path),
                     font_name=config.font_name,
                     fonts_dir=config.fonts_dir,
@@ -515,3 +470,56 @@ def process_video(config: PipelineConfig) -> None:
     finally:
         if os.path.exists(audio_path):
             os.remove(audio_path)
+
+
+def _process_source_srt(config: PipelineConfig) -> None:
+    """Translate explicitly imported source captions without ASR or invented words."""
+    if config.source_srt is None:
+        raise ValueError("Source SRT path is required")
+    source = read_source_srt(config.source_srt)
+    reference = load_reference_material(config.reference_file)
+    locked = load_locked_terms(config.locked_terms_file)
+    if locked is None:
+        raise ValueError("Locked Terms configuration is invalid")
+    output_dir = os.path.join(config.output_dir, os.path.splitext(config.video_filename)[0])
+    os.makedirs(output_dir, exist_ok=True)
+    store = CheckpointStore(os.path.join(output_dir, ".hermecho-checkpoint.json"))
+    key = fingerprint_data({"source": source, "model": config.translation_model,
+        "target_language": config.target_language, "prompt": translation_prompt_fingerprint(),
+        "reference": reference, "locked_terms": locked})
+    store.discard_stale_translation(key)
+    def load_chunk(
+        index: int, chunk: list[dict[str, Any]]
+    ) -> Optional[dict[str, str]]:
+        if config.force:
+            return None
+        return store.load_accepted_translation_chunk(key, index, fingerprint_data(chunk),
+            [str(s.get("_translation_id", i)) for i, s in enumerate(chunk)])
+    def save_chunk(
+        index: int, chunk: list[dict[str, Any]], translations: dict[str, str]
+    ) -> None:
+        store.save_accepted_translation_chunk(key, index, fingerprint_data(chunk), translations)
+    translated = translate_segments(source, target_language=config.target_language,
+        translation_model=config.translation_model, reference_material=reference, locked_terms=locked,
+        accepted_chunk_loader=load_chunk, accepted_chunk_saver=save_chunk,
+        preserve_markers=True)
+    if translated is None:
+        raise ValueError("Translation Gate blocked final SRT/video delivery")
+    translated = preserve_source_translation(source, translated)
+    video_path = os.path.abspath(os.path.join(config.input_dir, config.video_filename))
+    output_id = datetime.now().strftime("%Y%m%d_%H%M%S") + "_" + uuid4().hex[:12]
+    base = os.path.join(output_dir, f"{os.path.splitext(config.video_filename)[0]}_{output_id}")
+    generate_srt(source, base + "_transcript_source.srt")
+    generate_srt(translated, base + "_subtitles.srt")
+    duration = _video_duration_seconds(video_path)
+    write_bundle(base + "_subtitle_bundle.json", source, translated,
+        video_fingerprint=fingerprint_file(video_path), source_language=config.language,
+        target_language=config.target_language, profile=delivery_profile_for_orientation(is_portrait_video(video_path)), duration=duration)
+    if not config.srt_only:
+        visible, _ = render_plan(translated, duration)
+        generate_srt(visible, base + "_render.srt")
+        burn_subtitles_into_video(video_path, base + "_render.srt", base + "_translated.mp4",
+            font_name=config.font_name, fonts_dir=config.fonts_dir, font_size=config.font_size,
+            outline_width=config.outline_width, use_box_background=config.box_background,
+            margin_v=config.margin_v, margin_h=config.margin_h, alignment=config.alignment)
+    emit_progress("completion", "complete", "Hermecho pipeline completed", pct=100)

@@ -2,6 +2,8 @@
 This module contains functions for translating text using OpenRouter.
 """
 import hashlib
+from contextlib import contextmanager
+from contextvars import ContextVar
 import inspect
 import json
 import os
@@ -18,6 +20,24 @@ from .prompts import (
     build_source_boundary_review_prompt,
     build_translation_prompt,
 )
+
+
+_request_counts: ContextVar[dict | None] = ContextVar("translation_request_counts", default=None)
+
+
+@contextmanager
+def track_translation_requests():
+    """Count application SDK calls; underlying SDK transport retries are excluded."""
+    counts = {}
+    token = _request_counts.set(counts)
+    try:
+        yield counts
+    finally:
+        _request_counts.reset(token)
+
+
+def translation_request_counts() -> dict:
+    return dict(_request_counts.get() or {})
 
 
 # Constants for the sliding window approach
@@ -196,6 +216,9 @@ def _request_json_translation(
     response_text = ""
     usage: Optional[Dict[str, Any]] = None
     try:
+        counts = _request_counts.get()
+        if counts is not None:
+            counts[label] = counts.get(label, 0) + 1
         response = client.chat.completions.create(
             model=translation_model,
             messages=[{"role": "user", "content": prompt_text}],
@@ -516,6 +539,7 @@ def translate_segments(
     accepted_chunk_saver: Optional[
         Callable[[int, List[Dict], Dict[str, str]], None]
     ] = None,
+    preserve_markers: bool = False,
 ) -> Optional[List[Dict]]:
     """
     Translates transcribed text segments using an optimized, two-layer strategy.
@@ -532,6 +556,8 @@ def translate_segments(
         locked_terms: Optional source-to-target terms enforced by the gate.
         accepted_chunk_loader: Optional source of previously accepted chunks.
         accepted_chunk_saver: Optional destination for newly accepted chunks.
+        preserve_markers: Keep ``[no speech]`` cues in their original positions
+            without sending them to the translation model.
 
     Returns:
         A list of translated segments, or None if a critical error occurs.
@@ -555,6 +581,16 @@ def translate_segments(
             total=0,
             pct=100,
         )
+        if preserve_markers:
+            return [
+                {
+                    **segment,
+                    "source_text": segment.get("text", "").strip(),
+                    "text": segment.get("text", "").strip(),
+                }
+                for segment in segments
+                if segment.get("text", "").strip() == "[no speech]"
+            ]
         return []
 
     translated_segments_text: Dict[str, str] = {}
@@ -676,7 +712,14 @@ def translate_segments(
         final_segments = []
         for i, segment in enumerate(segments):
             original_text = segment.get("text", "").strip()
-            if not original_text or original_text == "[no speech]":
+            if not original_text:
+                continue
+            if original_text == "[no speech]":
+                if preserve_markers:
+                    marker_segment = segment.copy()
+                    marker_segment["source_text"] = original_text
+                    marker_segment["text"] = original_text
+                    final_segments.append(marker_segment)
                 continue
             translated_text = translated_segments_text.get(str(i))
             if translated_text is None:
