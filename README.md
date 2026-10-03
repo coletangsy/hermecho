@@ -241,7 +241,8 @@ anchors. It bounds a run to eight original overlap repairs, records the
 original segments and fresh windows in `.mlx-timing-repairs.json`, and resets
 downstream grouping and translation after an accepted repair. It never clamps,
 sorts, or dictionary-deduplicates source words; missing or ambiguous anchors
-block delivery.
+block delivery. Nonempty original or fresh MLX segments without Source Word
+timestamps also block recovery rather than dropping their text.
 
 For translated runs, `--locked-terms-file` is required and defaults to
 `references/locked_terms.json`. It is a machine-readable JSON source-to-target

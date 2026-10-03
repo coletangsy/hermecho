@@ -214,7 +214,18 @@ def repair_mlx_word_timing(
     )
     from .checkpoints import fingerprint_file
 
-    words = [copy.deepcopy(word) for segment in segments for word in segment.get("words", [])]
+    def complete_words(evidence):
+        words = []
+        for index, segment in enumerate(evidence):
+            if segment.get("text", "").strip() and not segment.get("words"):
+                raise RuntimeError(
+                    "MLX timing recovery requires Source Word timestamps for every "
+                    f"nonempty segment (segment {index})."
+                )
+            words.extend(copy.deepcopy(segment.get("words", [])))
+        return words
+
+    words = complete_words(segments)
     boundaries = []
     for left, right in zip(words, words[1:]):
         if right["start"] < left["end"] and not math.isclose(
@@ -253,14 +264,11 @@ def repair_mlx_word_timing(
         fresh = _transcribe_with_mlx(
             audio_path, model, language, temperature, clip_timestamps=f"{start},{end}",
         )
-        bridge = [
-            copy.deepcopy(word)
-            for segment in fresh for word in segment["words"]
-        ]
         record = {"start": start, "end": end, "boundary": boundary, "segments": fresh}
         audit["windows"].append(record)
         save_audit()
         try:
+            bridge = complete_words(fresh)
             _validate_absolute_words(bridge, duration)
             if any(word["start"] < start or word["end"] > end for word in bridge):
                 raise RuntimeError("MLX timing recovery returned words outside the requested window.")

@@ -50,6 +50,35 @@ def test_cached_mlx_overlap_is_retranscribed_with_anchors_and_raw_audit():
         assert words[-3:] == [s["words"][0] for s in original[-3:]]
 
 
+@pytest.mark.parametrize("incomplete_source", ["original", "fresh"])
+def test_mlx_repair_rejects_nonempty_segments_without_word_evidence(incomplete_source, tmp_path):
+    original = segments([
+        word("one", 410, 410.2), word("two", 411, 411.2), word("three", 412, 412.2),
+        word("yes", 418.4, 418.92), word("right", 418.85, 419.46),
+        word("four", 423, 423.2), word("five", 424, 424.2), word("six", 425, 425.2),
+    ])
+    fresh = copy.deepcopy(original)
+    fresh[4]["start"] = fresh[4]["words"][0]["start"] = 419.0
+    evidence = original if incomplete_source == "original" else fresh
+    evidence.insert(0, {"start": 409, "end": 409.5, "text": "missing", "words": []})
+    unchanged = copy.deepcopy(original)
+    with patch("hermecho.openrouter_transcription._ffprobe_duration", return_value=440), \
+         patch("hermecho.checkpoints.fingerprint_file", return_value="audio-hash"), \
+         patch("hermecho.transcription._transcribe_with_mlx", return_value=fresh) as transcribe:
+        with pytest.raises(RuntimeError, match="Source Word timestamps for every nonempty segment"):
+            repair_mlx_word_timing(
+                "audio.mp3", original, "large", "ko", 0, audit_path=str(tmp_path / "audit.json"),
+            )
+    assert original == unchanged
+    assert transcribe.call_count == (0 if incomplete_source == "original" else 1)
+    if incomplete_source == "fresh":
+        audit = json.loads((tmp_path / "audit.json").read_text())
+        assert audit["status"] == "partial"
+        assert audit["original_segments"] == unchanged
+        assert audit["windows"][0]["segments"] == fresh
+        assert "Source Word timestamps" in audit["windows"][0]["error"]
+
+
 def test_valid_mlx_transcript_never_loads_runtime_or_rewrites_segments():
     original = segments([word("hello", 0, 1), word("world", 1, 2)])
     with patch("hermecho.transcription._transcribe_with_mlx") as transcribe:
