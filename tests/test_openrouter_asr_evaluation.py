@@ -30,6 +30,16 @@ class _Response:
 
 
 class TestOpenRouterAsrEvaluation(unittest.TestCase):
+    def test_duplicate_timestamp_error_identifies_the_offending_word(self) -> None:
+        with self.assertRaisesRegex(
+            ValueError,
+            r"at word 1: start=50.12, end=50.799, previous_end=50.799, duration=62",
+        ):
+            _normalise_words({"words": [
+                {"word": "연애하세요.", "start": 50.12, "end": 50.799},
+                {"word": "연애하세요.", "start": 50.12, "end": 50.799},
+            ]}, 62)
+
     def test_rejects_text_without_word_timestamps(self) -> None:
         with self.assertRaisesRegex(ValueError, "no word-level timestamps"):
             _normalise_words({"text": "hello"}, 10)

@@ -1,6 +1,7 @@
 """
 Whisper transcription with optional MLX and explicit OpenRouter backends.
 """
+import copy
 import importlib.util
 import math
 import os
@@ -10,6 +11,7 @@ from typing import Any, Dict, List, Optional
 
 from .asr_comparison import DEFAULT_EVIDENCE_DIR, evidence_allows_mlx
 from .openrouter_transcription import DEFAULT_OPENROUTER_TRANSCRIPTION_MODEL
+from .progress import emit_progress
 
 
 MLX_LARGE_V3_MODEL = "mlx-community/whisper-large-v3-mlx"
@@ -159,6 +161,8 @@ def _transcribe_with_mlx(
     model: str,
     language: Optional[str],
     temperature: float,
+    *,
+    clip_timestamps: Optional[str] = None,
 ) -> List[Dict]:
     error = validate_mlx_backend(model)
     if error:
@@ -169,6 +173,7 @@ def _transcribe_with_mlx(
     mlx_model = _mlx_model_path(model)
 
     print(f"Loading MLX Whisper model from {mlx_model}...")
+    clip_options = {"clip_timestamps": clip_timestamps} if clip_timestamps is not None else {}
     result = mlx_whisper.transcribe(  # type: ignore
         audio_path,
         path_or_hf_repo=mlx_model,
@@ -179,6 +184,7 @@ def _transcribe_with_mlx(
         condition_on_previous_text=False,
         no_speech_threshold=0.85,
         compression_ratio_threshold=1.7,
+        **clip_options,
     )
     detected_language, segments = _normalise_mlx_result(result)
     if not segments:
@@ -190,6 +196,117 @@ def _transcribe_with_mlx(
     print("Audio transcribed successfully")
     print("Transcription: MLX Whisper (no API token usage).")
     return segments
+
+
+def repair_mlx_word_timing(
+    audio_path: str,
+    segments: List[Dict],
+    model: str,
+    language: Optional[str],
+    temperature: float,
+    *,
+    audit_path: Optional[str] = None,
+) -> List[Dict]:
+    """Acquire fresh local evidence around overlaps, joining only at stable anchors."""
+    from .openrouter_transcription import (
+        _ffprobe_duration, _splice_boundary_words,
+        _validate_absolute_words, _write_json,
+    )
+    from .checkpoints import fingerprint_file
+
+    words = [copy.deepcopy(word) for segment in segments for word in segment.get("words", [])]
+    boundaries = []
+    for left, right in zip(words, words[1:]):
+        if right["start"] < left["end"] and not math.isclose(
+            right["start"], left["end"], rel_tol=0, abs_tol=1e-9
+        ):
+            boundaries.append((left["end"] + right["start"]) / 2)
+    if not boundaries:
+        return segments
+    if len(boundaries) > 8:
+        raise RuntimeError("MLX timing recovery requires manual review: more than 8 overlapping word boundaries.")
+
+    duration = _ffprobe_duration(Path(audio_path))
+    audit = {
+        "version": 1, "status": "partial", "backend": "mlx", "model": model,
+        "language": language, "temperature": temperature,
+        "audio_sha256": fingerprint_file(audio_path),
+        "original_segments": copy.deepcopy(segments), "windows": [],
+    }
+
+    def save_audit():
+        if audit_path:
+            _write_json(Path(audit_path), audit)
+
+    save_audit()
+    for boundary in boundaries:
+        # An earlier recovery window may already have covered a nearby overlap.
+        if not any(left["end"] > right["start"] and
+                   abs((left["end"] + right["start"]) / 2 - boundary) < 1e-6
+                   for left, right in zip(words, words[1:])):
+            continue
+        start = max(0.0, math.floor(boundary - 10))
+        end = min(duration, start + 24)
+        emit_progress("transcription", "running", f"Re-transcribing MLX timing near {boundary:g}s")
+        # Native clipping retains the full audio's time origin and avoids
+        # introducing another MP3 encode and a fractional timestamp offset.
+        fresh = _transcribe_with_mlx(
+            audio_path, model, language, temperature, clip_timestamps=f"{start},{end}",
+        )
+        bridge = [
+            copy.deepcopy(word)
+            for segment in fresh for word in segment["words"]
+        ]
+        record = {"start": start, "end": end, "boundary": boundary, "segments": fresh}
+        audit["windows"].append(record)
+        save_audit()
+        try:
+            _validate_absolute_words(bridge, duration)
+            if any(word["start"] < start or word["end"] > end for word in bridge):
+                raise RuntimeError("MLX timing recovery returned words outside the requested window.")
+            left = [word for word in words if start <= word["start"] < boundary]
+            right = [word for word in words if boundary <= word["start"] <= end]
+            acquired = _splice_boundary_words(left, right, bridge, boundary, backend_label="MLX")
+            words = (
+                [word for word in words if word["start"] < start]
+                + acquired
+                + [word for word in words if word["start"] > end]
+            )
+        except RuntimeError as error:
+            record["error"] = str(error)
+            save_audit()
+            raise RuntimeError(f"MLX timing recovery near {boundary:g}s failed: {error}") from error
+    _validate_absolute_words(words, duration)
+    # Retain every unaffected segment and its exact text/timing; only the
+    # acquired interval is reconstructed from its new Source Words.
+    result = []
+    position = 0
+    for segment in segments:
+        original = segment.get("words", [])
+        if original and words[position:position + len(original)] == original:
+            result.append(copy.deepcopy(segment))
+            position += len(original)
+            continue
+        if original and original[0] in words[position:]:
+            next_position = words.index(original[0], position)
+            if next_position > position:
+                acquired = words[position:next_position]
+                result.append({"start": acquired[0]["start"], "end": acquired[-1]["end"],
+                               "text": " ".join(w["word"].strip() for w in acquired), "words": acquired})
+                position = next_position
+            if words[position:position + len(original)] == original:
+                result.append(copy.deepcopy(segment))
+                position += len(original)
+    if position < len(words):
+        acquired = words[position:]
+        result.append({"start": acquired[0]["start"], "end": acquired[-1]["end"],
+                       "text": " ".join(w["word"].strip() for w in acquired), "words": acquired})
+    from .sentence_first import build_source_sentences
+
+    build_source_sentences(result)
+    audit["status"] = "complete"
+    save_audit()
+    return result
 
 
 def transcribe_audio(

@@ -342,16 +342,18 @@ def _record_timestamp_retry_failure(
         state["retry_history"] = history
     if not isinstance(history, list):
         raise RuntimeError("Invalid OpenRouter retry history checkpoint.")
-    history.append(
-        {
-            "status": status,
-            "scope": scope,
-            "identifier": identifier,
-            "attempt_count": len(attempts),
-            "attempts": [dict(attempt) for attempt in attempts if isinstance(attempt, dict)],
-            "diagnostics": list(diagnostics) or [str(error)],
-        }
-    )
+    record = {
+        "status": status,
+        "scope": scope,
+        "identifier": identifier,
+        "attempt_count": len(attempts),
+        "attempts": [dict(attempt) for attempt in attempts if isinstance(attempt, dict)],
+        "diagnostics": list(diagnostics) or [str(error)],
+    }
+    recovery = getattr(error, "timestamp_retry_recovery", None)
+    if isinstance(recovery, dict):
+        record["recovery"] = dict(recovery)
+    history.append(record)
 
 
 def _attach_timestamp_retry_context(
@@ -362,6 +364,257 @@ def _attach_timestamp_retry_context(
     if attempts:
         setattr(error, "timestamp_retry_attempts", [dict(attempt) for attempt in attempts])
         setattr(error, "timestamp_retry_diagnostics", list(diagnostics))
+
+
+def _attempt_records(
+    metadata: dict[str, Any],
+    *,
+    scope: str,
+    window: dict[str, float],
+) -> list[dict[str, Any]]:
+    """Flatten one request/retry metadata record for recovery auditing."""
+    nested = metadata.get("attempts")
+    records = nested if isinstance(nested, list) and nested else [metadata]
+    return [
+        {**dict(record), "scope": scope, "window": dict(window)}
+        for record in records
+        if isinstance(record, dict)
+    ]
+
+
+def _recovery_metadata(
+    original_attempts: list[dict[str, Any]],
+    original_diagnostics: list[str],
+    children: list[tuple[dict[str, float], list[dict[str, Any]], dict[str, Any]]],
+    *,
+    duration: float,
+    midpoint: float,
+    context: float,
+) -> dict[str, Any]:
+    original_window = {"start": 0.0, "end": duration}
+    attempts = [
+        {**dict(attempt), "scope": "original", "window": dict(original_window)}
+        for attempt in original_attempts
+        if isinstance(attempt, dict)
+    ]
+    diagnostics = list(original_diagnostics)
+    child_provenance = []
+    for window, _words, metadata in children:
+        attempts.extend(_attempt_records(metadata, scope="recovery", window=window))
+        child_diagnostics = metadata.get("retry_diagnostics")
+        if isinstance(child_diagnostics, list):
+            diagnostics.extend(str(item) for item in child_diagnostics)
+        child_provenance.append(
+            {
+                "start": window["start"],
+                "end": window["end"],
+                "offset_seconds": window["start"],
+                "provenance": "fresh_remote_words",
+                "word_count": len(_words),
+                "attempt_count": len(_attempt_records(metadata, scope="recovery", window=window)),
+                "generation_ids": [
+                    attempt.get("generation_id")
+                    for attempt in _attempt_records(metadata, scope="recovery", window=window)
+                ],
+            }
+        )
+    costs = [attempt.get("cost_usd") for attempt in attempts]
+    elapsed = [attempt.get("elapsed_seconds") for attempt in attempts]
+    aggregate = dict(children[-1][2]) if children else {}
+    aggregate["cost_usd"] = (
+        sum(float(value) for value in costs)
+        if costs and all(_finite_float(value) and float(value) >= 0 for value in costs)
+        else None
+    )
+    aggregate["elapsed_seconds"] = (
+        round(sum(float(value) for value in elapsed), 3)
+        if elapsed and all(_finite_float(value) and float(value) >= 0 for value in elapsed)
+        else None
+    )
+    aggregate["attempt_count"] = len(attempts)
+    aggregate["attempts"] = attempts
+    aggregate["retry_diagnostics"] = diagnostics
+    aggregate["recovery"] = {
+        "strategy": "midpoint_context",
+        "original_window": original_window,
+        "boundary": midpoint,
+        "context_seconds": context,
+        "subwindows": child_provenance,
+    }
+    return aggregate
+
+
+def _attach_recovery_failure_context(
+    error: BaseException,
+    original_attempts: list[dict[str, Any]],
+    original_diagnostics: list[str],
+    child_attempts: list[dict[str, Any]] | None = None,
+    child_diagnostics: list[str] | None = None,
+    recovery: dict[str, Any] | None = None,
+) -> None:
+    attempts = [dict(attempt) for attempt in original_attempts if isinstance(attempt, dict)]
+    attempts.extend(dict(attempt) for attempt in child_attempts or [] if isinstance(attempt, dict))
+    diagnostics = list(original_diagnostics)
+    diagnostics.extend(str(item) for item in child_diagnostics or [])
+    diagnostics.append(str(error))
+    _attach_timestamp_retry_context(error, attempts, diagnostics)
+    if recovery is not None:
+        setattr(error, "timestamp_retry_recovery", dict(recovery))
+
+
+def _recover_invalid_word_timestamps(
+    audio_path: Path,
+    model: str,
+    language: Optional[str],
+    temperature: float,
+    api_key: str,
+    duration: float,
+    *,
+    label: str,
+    current: int | None,
+    total: int | None,
+    original_attempts: list[dict[str, Any]],
+    original_diagnostics: list[str],
+) -> tuple[str, list[dict[str, Any]], dict[str, Any]]:
+    """Retry one bad long window as two overlapping, non-recursive windows."""
+    midpoint = duration / 2.0
+    context = min(BOUNDARY_CONTEXT_SECONDS, midpoint)
+    left_window = {"start": 0.0, "end": midpoint + context}
+    right_window = {"start": midpoint - context, "end": duration}
+    children: list[tuple[dict[str, float], list[dict[str, Any]], dict[str, Any]]] = []
+    child_attempts: list[dict[str, Any]] = []
+    child_diagnostics: list[str] = []
+    recovery_context = {
+        "strategy": "midpoint_context",
+        "original_window": {"start": 0.0, "end": duration},
+        "boundary": midpoint,
+        "context_seconds": context,
+        "subwindows": [dict(left_window), dict(right_window)],
+    }
+    emit_progress(
+        "transcription",
+        "running",
+        f"Recovering {label} with shorter overlapping windows",
+        detail=recovery_context,
+        **({"current": current} if current is not None else {}),
+        **({"total": total} if total is not None else {}),
+    )
+    try:
+        with tempfile.TemporaryDirectory(prefix="hermecho-openrouter-recovery-") as temporary_dir:
+            root = Path(temporary_dir)
+            for name, window in (("left", left_window), ("right", right_window)):
+                child_audio = root / f"{name}.mp3"
+                child_duration = window["end"] - window["start"]
+                _extract_audio(audio_path, child_audio, window["start"], child_duration)
+                try:
+                    text, words, metadata = _transcribe_validated_words(
+                        child_audio,
+                        model,
+                        language,
+                        temperature,
+                        api_key,
+                        child_duration,
+                        label=f"{label} {name} recovery window",
+                        current=current,
+                        total=total,
+                        allow_recovery=False,
+                    )
+                except RuntimeError as error:
+                    error_attempts = getattr(error, "timestamp_retry_attempts", None)
+                    if not isinstance(error_attempts, list):
+                        error_attempts = getattr(error, "attempts", [])
+                    error_diagnostics = getattr(error, "timestamp_retry_diagnostics", None)
+                    if not isinstance(error_diagnostics, list):
+                        error_diagnostics = getattr(error, "diagnostics", [])
+                    child_attempts.extend(
+                        dict(attempt)
+                        for attempt in error_attempts
+                        if isinstance(attempt, dict)
+                    )
+                    child_diagnostics.extend(
+                        str(item)
+                        for item in error_diagnostics
+                    )
+                    _attach_recovery_failure_context(
+                        error,
+                        original_attempts,
+                        original_diagnostics,
+                        child_attempts,
+                        child_diagnostics,
+                        recovery_context,
+                    )
+                    wrapped = RuntimeError(
+                        f"OpenRouter shorter-window recovery failed for {label} {name}: {error}"
+                    )
+                    _attach_recovery_failure_context(
+                        wrapped,
+                        original_attempts,
+                        original_diagnostics,
+                        child_attempts,
+                        child_diagnostics,
+                        recovery_context,
+                    )
+                    raise wrapped from error
+                children.append((window, words, metadata))
+                child_attempts.extend(_attempt_records(metadata, scope="recovery", window=window))
+
+            left_words = children[0][1]
+            right_words = [
+                {
+                    "word": word["word"],
+                    "start": word["start"] + right_window["start"],
+                    "end": word["end"] + right_window["start"],
+                }
+                for word in children[1][1]
+            ]
+            joined = _splice_boundary_words(
+                left_words,
+                right_words,
+                right_words,
+                midpoint,
+            )
+            _validate_absolute_words(joined, duration)
+    except RuntimeError as error:
+        if not getattr(error, "timestamp_retry_attempts", None):
+            _attach_recovery_failure_context(
+                error,
+                original_attempts,
+                original_diagnostics,
+                child_attempts,
+                child_diagnostics,
+                recovery_context,
+            )
+        raise
+    except (OSError, ValueError, TypeError, KeyError, OverflowError,
+            subprocess.CalledProcessError) as error:
+        _attach_recovery_failure_context(
+            error,
+            original_attempts,
+            original_diagnostics,
+            child_attempts,
+            child_diagnostics,
+            recovery_context,
+        )
+        wrapped = RuntimeError(f"OpenRouter shorter-window recovery failed for {label}: {error}")
+        _attach_recovery_failure_context(
+            wrapped,
+            original_attempts,
+            original_diagnostics,
+            child_attempts,
+            child_diagnostics,
+            recovery_context,
+        )
+        raise wrapped from error
+
+    metadata = _recovery_metadata(
+        original_attempts,
+        original_diagnostics,
+        children,
+        duration=duration,
+        midpoint=midpoint,
+        context=context,
+    )
+    return " ".join(word["word"].strip() for word in joined), joined, metadata
 
 
 def _transcribe_validated_words(
@@ -375,8 +628,9 @@ def _transcribe_validated_words(
     label: str,
     current: int | None = None,
     total: int | None = None,
+    allow_recovery: bool = True,
 ) -> tuple[str, list[dict[str, Any]], dict[str, Any]]:
-    """Request one chunk, retrying only invalid word-timestamp responses."""
+    """Request one chunk, retrying invalid timing and optionally recovering it."""
     attempts: list[dict[str, Any]] = []
     diagnostics: list[str] = []
     for attempt_number in range(1, _MAX_WORD_TIMESTAMP_ATTEMPTS + 1):
@@ -418,12 +672,27 @@ def _transcribe_validated_words(
                 f"attempt {index}: {message}"
                 for index, message in enumerate(diagnostics, start=1)
             )
-            raise OpenRouterWordTimestampError(
+            exhausted = OpenRouterWordTimestampError(
                 f"{diagnostics[-1]} (after {attempt_number} attempts; "
                 f"diagnostics: {diagnostic_text})",
                 attempts=attempts,
                 diagnostics=diagnostics,
-            ) from error
+            )
+            if allow_recovery and duration >= 40.0:
+                return _recover_invalid_word_timestamps(
+                    audio_path,
+                    model,
+                    language,
+                    temperature,
+                    api_key,
+                    duration,
+                    label=label,
+                    current=current,
+                    total=total,
+                    original_attempts=attempts,
+                    original_diagnostics=diagnostics,
+                )
+            raise exhausted from error
         except RuntimeError as error:
             _attach_timestamp_retry_context(error, attempts, diagnostics)
             raise
@@ -545,6 +814,20 @@ def _cached_chunk(
     duration = spec["end"] - spec["start"]
     if not _validate_cached_words(record.get("words"), duration, record.get("text")):
         return None
+    audit_fingerprint = record.get("recovery_metadata_fingerprint")
+    metadata = record.get("metadata")
+    if audit_fingerprint is not None or (isinstance(metadata, dict) and "recovery" in metadata):
+        try:
+            complete_audit = (
+                isinstance(audit_fingerprint, str)
+                and isinstance(metadata, dict)
+                and isinstance(metadata.get("recovery"), dict)
+                and _fingerprint(metadata) == audit_fingerprint
+            )
+        except (ValueError, TypeError):
+            complete_audit = False
+        if not complete_audit:
+            raise RuntimeError("Recovered OpenRouter chunk has incomplete or modified request audit metadata.")
     return record
 
 
@@ -612,6 +895,8 @@ def _splice_boundary_words(
     right: list[dict[str, Any]],
     bridge: list[dict[str, Any]],
     boundary: float,
+    *,
+    backend_label: str = "OpenRouter",
 ) -> list[dict[str, Any]]:
     """Join at matching three-word/time anchors outside the disputed overlap.
 
@@ -640,18 +925,25 @@ def _splice_boundary_words(
 
     left_anchors, right_anchors = anchors(left, "left"), anchors(right, "right")
     if not left_anchors or not right_anchors:
-        raise RuntimeError(f"OpenRouter boundary near {boundary:g}s has no matching word/time anchors.")
-    li, lb = left_anchors[-1]
-    ri, rb = right_anchors[0]
-    if (sum(i == li or j == lb for i, j in left_anchors) != 1
-            or sum(i == ri or j == rb for i, j in right_anchors) != 1):
-        raise RuntimeError(f"OpenRouter boundary near {boundary:g}s has ambiguous anchors.")
-    if lb + 3 > rb:
-        raise RuntimeError(f"OpenRouter boundary near {boundary:g}s has inconsistent anchors.")
-    joined = left[:li + 3] + bridge[lb + 3:rb] + right[ri:]
-    if any(a["start"] > b["start"] or a["end"] > b["end"] for a, b in zip(joined, joined[1:])):
-        raise RuntimeError(f"OpenRouter boundary near {boundary:g}s has unordered word evidence.")
-    return joined
+        raise RuntimeError(
+            f"{backend_label} boundary near {boundary:g}s has no matching word/time anchors."
+        )
+    for li, lb in reversed(left_anchors):
+        for ri, rb in right_anchors:
+            if (sum(i == li or j == lb for i, j in left_anchors) != 1
+                    or sum(i == ri or j == rb for i, j in right_anchors) != 1):
+                raise RuntimeError(f"{backend_label} boundary near {boundary:g}s has ambiguous anchors.")
+            if lb + 3 > rb:
+                continue
+            joined = left[:li + 3] + bridge[lb + 3:rb] + right[ri:]
+            # Timestamp drift at an otherwise matching anchor must never
+            # create a positive overlap between old and newly acquired words.
+            if all(a["end"] <= b["start"] for a, b in zip(joined, joined[1:])):
+                return joined
+    raise RuntimeError(
+        f"{backend_label} boundary near {boundary:g}s has overlapping word evidence "
+        "at every matching anchor."
+    )
 
 
 def _segments_from_words(words: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -896,6 +1188,8 @@ def transcribe_openrouter(
                 "words": words,
                 "metadata": metadata,
             }
+            if "recovery" in metadata:
+                record["recovery_metadata_fingerprint"] = _fingerprint(metadata)
             state["chunks"][str(int(spec["index"]))] = record
             state["status"] = "partial"
             if checkpoint is not None:
@@ -945,10 +1239,16 @@ def _aggregate_metadata(
         if elapsed and all(_finite_float(value) and value >= 0 for value in elapsed)
         else None
     )
+    request_metadata = []
+    for item in all_metadata:
+        attempts = item.get("attempts")
+        request_metadata.extend(
+            attempts if isinstance(attempts, list) and attempts else [item]
+        )
     return {
         "cost_usd": cost,
         "model": [item.get("model") for item in all_metadata],
         "provider": [item.get("provider") for item in all_metadata],
-        "generation_id": [item.get("generation_id") for item in all_metadata],
+        "generation_id": [item.get("generation_id") for item in request_metadata if isinstance(item, dict)],
         "elapsed_seconds": elapsed_seconds,
     }

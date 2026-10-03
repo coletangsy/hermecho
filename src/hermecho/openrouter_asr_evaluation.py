@@ -81,7 +81,7 @@ def _normalise_words(response: dict[str, Any], duration: float) -> list[dict[str
         raise ValueError("Response has no word-level timestamps")
     words = []
     previous_end = 0.0
-    for raw in raw_words:
+    for index, raw in enumerate(raw_words):
         if not isinstance(raw, dict) or not isinstance(raw.get("word"), str) or not raw["word"].strip():
             raise ValueError("Response contains a malformed word")
         try:
@@ -92,7 +92,11 @@ def _normalise_words(response: dict[str, Any], duration: float) -> list[dict[str
             raise ValueError("Response contains a word without numeric timestamps") from error
         if (not math.isfinite(start) or not math.isfinite(end) or start < 0
                 or start > end or end > duration + 2 or start < previous_end):
-            raise ValueError("Response contains invalid or unordered word timestamps")
+            raise ValueError(
+                "Response contains invalid or unordered word timestamps "
+                f"at word {index}: start={start:g}, end={end:g}, "
+                f"previous_end={previous_end:g}, duration={duration:g}"
+            )
         words.append({"word": raw["word"], "start": start, "end": end})
         previous_end = end
     return words
