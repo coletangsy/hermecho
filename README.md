@@ -2,6 +2,12 @@
 
 Hermecho translates videos with Korean audio into Traditional Chinese (Taiwan) subtitles. It uses local Whisper or explicitly selected OpenRouter ASR for transcription, OpenRouter for translation, writes timestamped SRT files, and can hard-burn subtitles into a translated MP4.
 
+## Maintainer Documentation
+
+- [Repository guidance](AGENTS.md)
+- [Architecture overview](ARCHITECTURE.md)
+- [Changelog](CHANGELOG.md)
+
 ## Features
 
 - Local Whisper transcription in the normal pipeline with no transcription API usage.
