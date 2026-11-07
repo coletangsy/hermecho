@@ -78,3 +78,10 @@ Use the canonical triage roles `needs-triage`, `needs-info`, `ready-for-agent`, 
 ### Domain docs
 
 This is a single-context repository with a root `CONTEXT.md` and system-wide ADRs under `docs/adr/`. See `docs/agents/domain.md`.
+
+## Documentation
+
+- [README](README.md) is the CLI, backend, media, and operator entry point.
+- [ARCHITECTURE.md](ARCHITECTURE.md) summarizes transcription, translation, delivery, checkpoint, and rendering boundaries.
+- [CHANGELOG.md](CHANGELOG.md) records delivered behavior and documentation changes.
+- Update `ARCHITECTURE.md` when backends, timing/translation gates, checkpoints, output contracts, or rendering boundaries change. Update `CHANGELOG.md` for user-visible or operator-visible changes.
