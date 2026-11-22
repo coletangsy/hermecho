@@ -57,7 +57,9 @@ python -m pip install -e ".[mlx]"
 ```
 
 MLX model weights download on first use, then reuse the local Hugging Face
-snapshot on later runs. `auto` keeps portable Whisper unless
+snapshot on later runs. Hermecho limits MLX's unused buffer cache to 512 MiB
+during transcription and timing repair, while honoring any lower limit. This
+reduces unified-memory pressure during long recordings. `auto` keeps portable Whisper unless
 local Comparison Run evidence records a faster MLX median and explicit Human
 Approval with no Candidate-only regression.
 

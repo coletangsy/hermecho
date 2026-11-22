@@ -168,24 +168,34 @@ def _transcribe_with_mlx(
     if error:
         raise RuntimeError(error)
 
+    from mlx import core as mx  # type: ignore
     import mlx_whisper  # type: ignore
 
     mlx_model = _mlx_model_path(model)
 
     print(f"Loading MLX Whisper model from {mlx_model}...")
     clip_options = {"clip_timestamps": clip_timestamps} if clip_timestamps is not None else {}
-    result = mlx_whisper.transcribe(  # type: ignore
-        audio_path,
-        path_or_hf_repo=mlx_model,
-        language=language,
-        word_timestamps=True,
-        verbose=True,
-        temperature=temperature,
-        condition_on_previous_text=False,
-        no_speech_threshold=0.85,
-        compression_ratio_threshold=1.7,
-        **clip_options,
-    )
+    # Long transcriptions can leave gigabytes of unused buffers in unified memory.
+    cache_limit = 512 * 1024**2
+    previous_limit = mx.set_cache_limit(cache_limit)
+    try:
+        if previous_limit < cache_limit:
+            mx.set_cache_limit(previous_limit)
+        result = mlx_whisper.transcribe(  # type: ignore
+            audio_path,
+            path_or_hf_repo=mlx_model,
+            language=language,
+            word_timestamps=True,
+            verbose=True,
+            temperature=temperature,
+            condition_on_previous_text=False,
+            no_speech_threshold=0.85,
+            compression_ratio_threshold=1.7,
+            **clip_options,
+        )
+    finally:
+        mx.set_cache_limit(previous_limit)
+        mx.clear_cache()
     detected_language, segments = _normalise_mlx_result(result)
     if not segments:
         print("Warning: MLX Whisper returned no transcription segments.")

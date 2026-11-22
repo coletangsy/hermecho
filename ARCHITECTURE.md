@@ -30,6 +30,7 @@ Saved SRT output preserves every source cue and its timing, including zero-durat
 
 ## Evaluation and operational boundaries
 
+- MLX transcription and timing repair share a 512 MiB ceiling for unused cached buffers. The wrapper restores the caller's cache limit and clears the cache after each run.
 - ASR comparison and OpenRouter evaluation produce review artifacts; they do not silently change the normal backend or approve a model.
 - Invalid word timings, missing anchors, malformed responses, authentication failures, and missing credentials block the relevant path. Do not invent a local fallback for a request that explicitly requires remote evidence.
 - `ffmpeg` with subtitle filter support is required for burn-in. Keep `.env`, model weights, media, and generated output local.
