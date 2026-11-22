@@ -6,7 +6,7 @@ import types
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, call, patch
 
 from hermecho.checkpoints import CheckpointStore
 from hermecho.transcription import (
@@ -18,6 +18,11 @@ from hermecho.transcription import (
 
 
 class TestTranscribeAudio(unittest.TestCase):
+    def setUp(self) -> None:
+        self.mlx_core = MagicMock()
+        self.mlx_core.set_cache_limit.return_value = 4 * 1024**3
+        self.fake_mlx_package = types.SimpleNamespace(core=self.mlx_core)
+
     def test_mlx_validation_does_not_import_native_runtime(self) -> None:
         with patch("platform.system", return_value="Darwin"), \
             patch("platform.machine", return_value="arm64"), \
@@ -124,6 +129,7 @@ class TestTranscribeAudio(unittest.TestCase):
                 patch.dict(
                     sys.modules,
                     {
+                        "mlx": self.fake_mlx_package,
                         "mlx_whisper": fake_mlx,
                         "huggingface_hub": fake_huggingface_hub,
                     },
@@ -132,6 +138,7 @@ class TestTranscribeAudio(unittest.TestCase):
                 for model in ("large", "large-v3"):
                     with self.subTest(model=model):
                         fake_mlx.transcribe.reset_mock()
+                        self.mlx_core.reset_mock()
                         out = transcribe_audio(
                             path,
                             model=model,
@@ -157,6 +164,11 @@ class TestTranscribeAudio(unittest.TestCase):
                                 }
                             ],
                         )
+                        self.assertEqual(self.mlx_core.mock_calls, [
+                            call.set_cache_limit(512 * 1024**2),
+                            call.set_cache_limit(4 * 1024**3),
+                            call.clear_cache(),
+                        ])
                         fake_mlx.transcribe.assert_called_once_with(
                             path,
                             path_or_hf_repo="mlx-community/whisper-large-v3-mlx",
@@ -276,6 +288,7 @@ class TestTranscribeAudio(unittest.TestCase):
                     patch.dict(
                         sys.modules,
                         {
+                            "mlx": self.fake_mlx_package,
                             "mlx_whisper": fake_mlx,
                             "huggingface_hub": fake_huggingface_hub,
                         },
@@ -315,6 +328,7 @@ class TestTranscribeAudio(unittest.TestCase):
                     patch.dict(
                         sys.modules,
                         {
+                            "mlx": self.fake_mlx_package,
                             "mlx_whisper": fake_mlx,
                             "huggingface_hub": fake_huggingface_hub,
                         },
@@ -363,6 +377,7 @@ class TestTranscribeAudio(unittest.TestCase):
         self.assertIn('install -e ".[mlx]"', str(mock_print.call_args_list))
 
     def test_mlx_runtime_failure_does_not_fallback_to_whisper(self) -> None:
+        self.mlx_core.set_cache_limit.return_value = 64 * 1024**2
         fake_mlx = types.SimpleNamespace(transcribe=MagicMock(side_effect=RuntimeError("failed")))
         fake_whisper = types.SimpleNamespace(load_model=MagicMock())
 
@@ -374,13 +389,21 @@ class TestTranscribeAudio(unittest.TestCase):
             with patch("platform.system", return_value="Darwin"), \
                 patch("platform.machine", return_value="arm64"), \
                 patch("importlib.util.find_spec", return_value=object()), \
-                patch.dict(sys.modules, {"mlx_whisper": fake_mlx, "whisper": fake_whisper}):
+                patch.dict(sys.modules, {
+                    "mlx": self.fake_mlx_package, "mlx_whisper": fake_mlx, "whisper": fake_whisper,
+                }):
                 out = transcribe_audio(path, model="large", language="ko", backend="mlx")
         finally:
             os.unlink(path)
 
         self.assertIsNone(out)
         fake_whisper.load_model.assert_not_called()
+        self.assertEqual(self.mlx_core.mock_calls, [
+            call.set_cache_limit(512 * 1024**2),
+            call.set_cache_limit(64 * 1024**2),
+            call.set_cache_limit(64 * 1024**2),
+            call.clear_cache(),
+        ])
 
     def test_empty_whisper_segments_returns_empty_list(self) -> None:
         mock_whisper_model = MagicMock()
